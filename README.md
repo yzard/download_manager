@@ -49,7 +49,7 @@ docker compose -f /data/docker/4_torrent.yaml pull download_manager
 
 ```sh
 docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps -it download_manager init-user operator
-docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
+docker compose -f /data/docker/4_torrent.yaml up -d --no-deps --force-recreate download_manager
 ```
 
 初始化命令只允许建立一个账号。用户名和 Argon2id 密码哈希存放在 `/data/download_manager.sqlite3` 中。登录后可通过齿轮设置修改自己的密码。改密会结束已有会话，服务重启后也需要重新登录。
