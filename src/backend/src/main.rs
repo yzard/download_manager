@@ -4,8 +4,9 @@ mod storage;
 mod web_access;
 mod worker;
 
+use auth::{ACCESS_SECONDS, CookieKind, SESSION_SECONDS, TokenHash};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, FromRequestParts, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
@@ -20,14 +21,17 @@ use settings::{
 use std::{
     env,
     io::{self, Read},
+    net::SocketAddr,
     path::Path,
     sync::Arc,
 };
+use storage::accounts;
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
     sync::{Mutex, RwLock, watch},
 };
+use web_access::RequestSecurity;
 use worker::{Download, Snapshot};
 
 const DATABASE: &str = "/data/download_manager.sqlite3";
@@ -38,7 +42,6 @@ struct AppState {
     account_access: Arc<RwLock<auth::AccountAccess>>,
     save_lock: Arc<Mutex<()>>,
     status: Arc<RwLock<Snapshot>>,
-    sessions: Arc<Mutex<auth::Sessions>>,
 }
 
 #[derive(Serialize)]
@@ -93,33 +96,65 @@ impl IntoResponse for AppError {
     }
 }
 
-struct Session(String);
+#[derive(Clone, Copy)]
+struct Session {
+    hash: TokenHash,
+    secure: bool,
+}
 
 impl Session {
-    async fn require_active(&self, state: &AppState) -> Result<(), AppError> {
-        if state.sessions.lock().await.contains(&self.0) {
-            Ok(())
-        } else {
-            Err(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))
-        }
+    fn from_headers(headers: &HeaderMap, secure: bool) -> Option<Self> {
+        Some(Self {
+            hash: CookieKind::Access.read(headers, secure)?,
+            secure,
+        })
+    }
+
+    async fn remaining(self) -> Result<Option<i64>, AppError> {
+        tokio::task::spawn_blocking(move || {
+            let now = auth::now()?;
+            accounts::active_access(Path::new(DATABASE), &self.hash, self.secure, now)
+                .map(|expiry| expiry.map(|expiry| expiry - now))
+        })
+        .await
+        .map_err(session_error)?
+        .map_err(session_error)
+    }
+
+    async fn require_active(self) -> Result<(), AppError> {
+        self.remaining()
+            .await?
+            .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
+        Ok(())
     }
 }
 
 impl FromRequestParts<AppState> for Session {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
-        let token = auth::session_token(&parts.headers)
+    async fn from_request_parts(parts: &mut Parts, _state: &AppState) -> Result<Self, AppError> {
+        let secure = parts
+            .extensions
+            .get::<RequestSecurity>()
+            .ok_or(AppError(StatusCode::FORBIDDEN, "requestFailed"))?
+            .0;
+        let session = Self::from_headers(&parts.headers, secure)
             .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
-        let session = Session(token.to_owned());
-        session.require_active(state).await?;
+        session.require_active().await?;
         Ok(session)
     }
+}
+
+fn session_error(error: impl std::fmt::Display) -> AppError {
+    eprintln!("Download Manager session operation failed: {error}");
+    AppError(StatusCode::INTERNAL_SERVER_ERROR, "sessionCreationFailed")
 }
 
 #[derive(Serialize)]
 struct SessionInfo {
     language: Language,
+    refresh_in: Option<i64>,
+    can_refresh: bool,
     general: Option<GeneralSettings>,
     account_setup: Option<auth::AccountSetup>,
     username: Option<String>,
@@ -127,27 +162,32 @@ struct SessionInfo {
 
 async fn session_info(
     State(state): State<AppState>,
+    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
     headers: HeaderMap,
     _body: Bytes,
-) -> Json<SessionInfo> {
-    let (account, account_setup) = {
-        let access = state.account_access.read().await;
-        (access.account.clone(), access.setup_mode())
+) -> Result<Json<SessionInfo>, AppError> {
+    let refresh_in = match Session::from_headers(&headers, secure) {
+        Some(session) => session.remaining().await?,
+        None => None,
     };
-    let authenticated = if let Some(token) = auth::session_token(&headers) {
-        state.sessions.lock().await.contains(token)
-    } else {
-        false
-    };
+    let access = state.account_access.read().await;
+    let account_setup = access.setup_mode();
+    let authenticated = account_setup.is_none() && refresh_in.is_some() && access.account.is_some();
+    let can_refresh =
+        account_setup.is_none() && CookieKind::Refresh.read(&headers, secure).is_some();
     let general = state.settings.borrow().general.clone();
-    Json(SessionInfo {
+    Ok(Json(SessionInfo {
         language: general.language,
         general: authenticated.then_some(general),
+        refresh_in: if authenticated { refresh_in } else { None },
+        can_refresh,
         account_setup,
-        username: account
+        username: access
+            .account
+            .as_ref()
             .filter(|_| authenticated)
-            .map(|account| account.username),
-    })
+            .map(|account| account.username.clone()),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -157,14 +197,34 @@ struct Credentials {
     password: String,
 }
 
-async fn login(
-    State(state): State<AppState>,
-    Json(input): Json<Credentials>,
-) -> Result<impl IntoResponse, AppError> {
-    if !state.sessions.lock().await.allow_login_attempt() {
+fn verify_attempt(
+    password: &str,
+    account: &auth::Account,
+    matches_username: bool,
+    invalid: AppError,
+) -> Result<(), AppError> {
+    let path = Path::new(DATABASE);
+    let now = auth::now().map_err(session_error)?;
+    let throttle = accounts::login_throttle(path).map_err(session_error)?;
+    if throttle.retry_after > now {
         return Err(AppError(StatusCode::TOO_MANY_REQUESTS, "retryLogin"));
     }
-    let _guard = state.save_lock.lock().await;
+    let password_matches = auth::verify_password(password, &account.password_hash);
+    if !password_matches || !matches_username {
+        throttle
+            .record_failure(path, auth::now().map_err(session_error)?)
+            .map_err(session_error)?;
+        return Err(invalid);
+    }
+    Ok(())
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    Json(input): Json<Credentials>,
+) -> Result<(StatusCode, HeaderMap), AppError> {
+    let guard = state.save_lock.clone().lock_owned().await;
     let account = {
         let access = state.account_access.read().await;
         if access.setup_mode().is_some() {
@@ -175,33 +235,81 @@ async fn login(
             .clone()
             .ok_or(AppError(StatusCode::CONFLICT, "accountSetupRequired"))?
     };
-    let verified = tokio::task::spawn_blocking(move || {
-        let password_matches = auth::verify_password(&input.password, &account.password_hash);
-        password_matches && input.username == account.username
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        verify_attempt(
+            &input.password,
+            &account,
+            input.username == account.username,
+            AppError(StatusCode::UNAUTHORIZED, "invalidCredentials"),
+        )?;
+        let (refresh, refresh_hash) = generate_token()?;
+        let (access, access_hash) = generate_token()?;
+        let path = Path::new(DATABASE);
+        accounts::clear_throttle(path).map_err(session_error)?;
+        accounts::create_session(
+            path,
+            &refresh_hash,
+            &access_hash,
+            secure,
+            auth::now().map_err(session_error)?,
+            &account.password_hash,
+        )
+        .map_err(session_error)?;
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::SET_COOKIE,
+            CookieKind::Access.header(&access, ACCESS_SECONDS, secure),
+        );
+        headers.append(
+            header::SET_COOKIE,
+            CookieKind::Refresh.header(&refresh, SESSION_SECONDS, secure),
+        );
+        Ok((StatusCode::NO_CONTENT, headers))
     })
     .await
-    .map_err(|error| {
-        eprintln!("Password verification failed: {error}");
-        AppError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "passwordVerificationFailed",
-        )
-    })?;
-    if !verified {
-        return Err(AppError(StatusCode::UNAUTHORIZED, "invalidCredentials"));
-    }
-    let cookie = state
-        .sessions
-        .lock()
-        .await
-        .create()
-        .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "sessionCreationFailed"))?;
+    .map_err(session_error)?
+}
+
+fn generate_token() -> Result<(String, TokenHash), AppError> {
+    let token = auth::new_token().map_err(session_error)?;
+    let hash = auth::token_hash(&token).expect("generated tokens have 64 hexadecimal digits");
+    Ok((token, hash))
+}
+
+async fn renew_session(
+    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    headers: HeaderMap,
+    _body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    let refresh = CookieKind::Refresh
+        .read(&headers, secure)
+        .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
+    let cookie = tokio::task::spawn_blocking(move || {
+        let (access, access_hash) = generate_token()?;
+        let now = auth::now().map_err(session_error)?;
+        let expires =
+            accounts::renew_access(Path::new(DATABASE), &refresh, &access_hash, secure, now)
+                .map_err(session_error)?
+                .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
+        Ok::<_, AppError>(CookieKind::Access.header(&access, expires - now, secure))
+    })
+    .await
+    .map_err(session_error)??;
     Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupCredentials {
+    username: String,
+    password: String,
+    setup_code: String,
 }
 
 async fn setup_account(
     State(state): State<AppState>,
-    Json(input): Json<Credentials>,
+    Json(input): Json<SetupCredentials>,
 ) -> Result<StatusCode, AppError> {
     let guard = state.save_lock.clone().lock_owned().await;
     let closed = || AppError(StatusCode::CONFLICT, "accountSetupClosed");
@@ -219,29 +327,41 @@ async fn setup_account(
         return Err(AppError(StatusCode::BAD_REQUEST, "invalidPassword"));
     }
 
+    let invalid_code = || AppError(StatusCode::FORBIDDEN, "invalidSetupCode");
+    let code = auth::token_hash(input.setup_code.trim()).ok_or_else(invalid_code)?;
     // Publish the saved account even if the browser disconnects.
     tokio::spawn(async move {
         let _guard = guard;
         let account = tokio::task::spawn_blocking(move || {
+            let path = Path::new(DATABASE);
+            if !accounts::setup_code_valid(path, &code, auth::now().map_err(save_error)?)
+                .map_err(save_error)?
+            {
+                return Err(invalid_code());
+            }
             let account = auth::Account {
                 username: input.username,
                 password_hash: auth::hash_password(&input.password).map_err(save_error)?,
             };
-            if !storage::save_account_setup(Path::new(DATABASE), &account, reset_pending)
-                .map_err(save_error)?
+            if !accounts::save_account_setup(
+                path,
+                &account,
+                reset_pending,
+                &code,
+                auth::now().map_err(save_error)?,
+            )
+            .map_err(save_error)?
             {
-                return Err(closed());
+                return Err(invalid_code());
             }
             Ok(account)
         })
         .await
         .map_err(save_error)??;
-        let mut sessions = state.sessions.lock().await;
         *state.account_access.write().await = auth::AccountAccess {
             account: Some(account),
             reset_pending: false,
         };
-        sessions.clear();
         Ok::<_, AppError>(())
     })
     .await
@@ -251,15 +371,31 @@ async fn setup_account(
 }
 
 async fn logout(
-    State(state): State<AppState>,
-    session: Session,
+    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    headers: HeaderMap,
     _body: Bytes,
-) -> impl IntoResponse {
-    state.sessions.lock().await.revoke(&session.0);
-    (
-        StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, auth::expired_cookie())],
-    )
+) -> Result<(StatusCode, HeaderMap), AppError> {
+    let refresh = CookieKind::Refresh.read(&headers, secure);
+    let access = CookieKind::Access.read(&headers, secure);
+    if refresh.is_some() || access.is_some() {
+        tokio::task::spawn_blocking(move || {
+            accounts::revoke_session(Path::new(DATABASE), refresh, access, secure)
+        })
+        .await
+        .map_err(session_error)?
+        .map_err(session_error)?;
+    }
+    Ok((StatusCode::NO_CONTENT, expired_session(secure)))
+}
+
+fn expired_session(secure: bool) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.append(header::SET_COOKIE, CookieKind::Access.header("", 0, secure));
+    headers.append(
+        header::SET_COOKIE,
+        CookieKind::Refresh.header("", 0, secure),
+    );
+    headers
 }
 
 #[derive(Deserialize)]
@@ -271,6 +407,7 @@ struct PasswordInput {
 
 async fn change_password(
     State(state): State<AppState>,
+    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
     session: Session,
     Json(input): Json<PasswordInput>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -278,7 +415,7 @@ async fn change_password(
         return Err(AppError(StatusCode::BAD_REQUEST, "invalidPassword"));
     }
     let guard = state.save_lock.clone().lock_owned().await;
-    session.require_active(&state).await?;
+    session.require_active().await?;
     // Keep the write and session revocation together even if the browser disconnects.
     tokio::spawn(async move {
         let _guard = guard;
@@ -290,11 +427,14 @@ async fn change_password(
             .clone()
             .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
         let saved_account = tokio::task::spawn_blocking(move || {
-            if !auth::verify_password(&input.current_password, &account.password_hash) {
-                return Err(AppError(StatusCode::BAD_REQUEST, "invalidCurrentPassword"));
-            }
+            verify_attempt(
+                &input.current_password,
+                &account,
+                true,
+                AppError(StatusCode::BAD_REQUEST, "invalidCurrentPassword"),
+            )?;
             let new_hash = auth::hash_password(&input.new_password).map_err(save_error)?;
-            storage::change_password(Path::new(DATABASE), &account.password_hash, &new_hash)
+            accounts::change_password(Path::new(DATABASE), &account.password_hash, &new_hash)
                 .map_err(save_error)?;
             Ok::<_, AppError>(auth::Account {
                 password_hash: new_hash,
@@ -303,17 +443,12 @@ async fn change_password(
         })
         .await
         .map_err(save_error)??;
-        let mut sessions = state.sessions.lock().await;
         state.account_access.write().await.account = Some(saved_account);
-        sessions.clear();
         Ok::<_, AppError>(())
     })
     .await
     .map_err(save_error)??;
-    Ok((
-        StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, auth::expired_cookie())],
-    ))
+    Ok((StatusCode::NO_CONTENT, expired_session(secure)))
 }
 
 fn save_error(error: impl std::fmt::Display) -> AppError {
@@ -327,7 +462,7 @@ async fn save_baidu_settings(
     Json(input): Json<BaiduSettingsInput>,
 ) -> Result<StatusCode, AppError> {
     let guard = state.save_lock.clone().lock_owned().await;
-    session.require_active(&state).await?;
+    session.require_active().await?;
     let mut settings = state.settings.borrow().baidu.clone();
     if !input.bduss.trim().is_empty() {
         settings.bduss = input.bduss.trim().to_owned();
@@ -361,7 +496,7 @@ async fn save_general_settings(
     Json(mut settings): Json<GeneralSettings>,
 ) -> Result<Json<GeneralSettings>, AppError> {
     let guard = state.save_lock.clone().lock_owned().await;
-    session.require_active(&state).await?;
+    session.require_active().await?;
     settings.download_directory = settings.download_directory.trim().to_owned();
     settings
         .validate()
@@ -422,6 +557,7 @@ fn app(state: AppState, web_access: web_access::AllowedHosts) -> Router {
         .route("/api/v1/baidu/status", post(status))
         .route("/api/v1/auth/session", post(session_info))
         .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/refresh", post(renew_session))
         .route("/api/v1/auth/setup-account", post(setup_account))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/change-password", post(change_password))
@@ -441,27 +577,36 @@ async fn main() -> io::Result<()> {
     match args.as_slice() {
         [] => {}
         [command] if command == "import-baidu" => return import_baidu(),
-        _ => return Err(io::Error::other("Usage: download_manager [import-baidu]")),
-    }
-    let reset_requested = match env::var("RESET_USER_PASSWORD") {
-        Ok(value) if value == "true" => true,
-        Ok(value) if value == "false" => false,
-        Err(env::VarError::NotPresent) => false,
+        [command] if command == "setup-code" => return setup_code(),
         _ => {
             return Err(io::Error::other(
-                "RESET_USER_PASSWORD must be true or false",
+                "Usage: download_manager [import-baidu | setup-code]",
             ));
         }
-    };
+    }
     let initial = Settings {
         general: storage::load_general(Path::new(DATABASE))?,
         baidu: storage::load_baidu(Path::new(DATABASE))?,
     };
-    let account_access = storage::load_account_access(Path::new(DATABASE), reset_requested)?;
+    let account_access = accounts::load_account_access(Path::new(DATABASE), reset_requested()?)?;
     let allowed_hosts = match env::var("WEB_ALLOWED_HOSTS") {
         Ok(value) => web_access::AllowedHosts::parse(&value)?,
         Err(env::VarError::NotPresent) => web_access::AllowedHosts::default(),
         Err(error) => return Err(io::Error::other(error)),
+    };
+    let allowed_hosts = match (env::var("WEB_HTTPS_HOST"), env::var("WEB_TRUSTED_PROXY")) {
+        (Ok(host), Ok(proxy)) => allowed_hosts.with_https(
+            &host,
+            proxy
+                .parse()
+                .map_err(|_| io::Error::other("WEB_TRUSTED_PROXY must be an IP address"))?,
+        )?,
+        (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => allowed_hosts,
+        _ => {
+            return Err(io::Error::other(
+                "Set WEB_HTTPS_HOST and WEB_TRUSTED_PROXY together",
+            ));
+        }
     };
     let listener =
         TcpListener::bind(env::var("WEB_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()))
@@ -473,19 +618,42 @@ async fn main() -> io::Result<()> {
         account_access: Arc::new(RwLock::new(account_access)),
         save_lock: Arc::default(),
         status: status.clone(),
-        sessions: Arc::default(),
     };
     let mut terminate = signal(SignalKind::terminate())?;
     let worker = tokio::spawn(async move { worker::run(updates, &status).await });
     eprintln!("Download Manager listening on {}", listener.local_addr()?);
-    let result = axum::serve(listener, app(state, allowed_hosts))
-        .with_graceful_shutdown(async move {
-            tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
-        })
-        .await;
+    let result = axum::serve(
+        listener,
+        app(state, allowed_hosts).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+    })
+    .await;
     worker.abort();
     let _ = worker.await;
     result
+}
+
+fn reset_requested() -> io::Result<bool> {
+    match env::var("RESET_USER_PASSWORD") {
+        Ok(value) if value == "true" => Ok(true),
+        Ok(value) if value == "false" => Ok(false),
+        Err(env::VarError::NotPresent) => Ok(false),
+        _ => Err(io::Error::other(
+            "RESET_USER_PASSWORD must be true or false",
+        )),
+    }
+}
+
+fn setup_code() -> io::Result<()> {
+    let code = auth::new_token()?;
+    let hash = auth::token_hash(&code).expect("generated setup codes have 64 hexadecimal digits");
+    if !accounts::issue_setup_code(Path::new(DATABASE), &hash, reset_requested()?, auth::now()?)? {
+        return Err(io::Error::other("Account setup is closed"));
+    }
+    println!("{code}");
+    Ok(())
 }
 
 #[derive(Deserialize)]

@@ -21,6 +21,8 @@ let current;
 let setupShown = false;
 let session;
 let sessionGeneration = 0;
+let renewAt = Infinity;
+let renewal;
 
 function text(key) {
   return translate(language, key);
@@ -54,6 +56,7 @@ function applyLanguage(next) {
 
 function showSession(next, message) {
   session = next;
+  renewAt = next.refresh_in === null ? Infinity : performance.now() + next.refresh_in * 1000;
   general = next.general;
   applyLanguage(next.language);
   sessionGeneration++;
@@ -77,11 +80,28 @@ function showSession(next, message) {
   }
 }
 
-async function refreshSession(message) {
-  const generation = sessionGeneration;
+async function readSession() {
   const response = await postJson("/api/v1/auth/session", {});
   if (!response.ok) throw new Error("sessionUnavailable");
-  const next = await response.json();
+  return response.json();
+}
+
+function renewAccess() {
+  renewal ??= postJson("/api/v1/auth/refresh", {}).then((response) => {
+    if (!response.ok && response.status !== 401) throw new Error("sessionUnavailable");
+    return response.ok;
+  }).finally(() => { renewal = undefined; });
+  return renewal;
+}
+
+async function refreshSession(message, renew = false) {
+  const generation = sessionGeneration;
+  if (renew) await renewAccess();
+  let next = await readSession();
+  if (generation !== sessionGeneration) return;
+  if (!renew && !next.username && next.can_refresh && await renewAccess()) {
+    next = await readSession();
+  }
   if (generation === sessionGeneration) showSession(next, message);
 }
 
@@ -94,7 +114,16 @@ function postJson(path, payload) {
 }
 
 async function submitJson(path, payload) {
-  const response = await postJson(path, payload).catch(() => { throw new Error("requestFailed"); });
+  let response;
+  try {
+    response = await postJson(path, payload);
+    if (response.status === 401 && session?.username) {
+      await refreshSession("sessionExpired", true);
+      if (session?.username) response = await postJson(path, payload);
+    }
+  } catch {
+    throw new Error("requestFailed");
+  }
   if (!response.ok) {
     const details = await response.json().catch(() => ({}));
     throw new Error(text(details.error) ? details.error : "requestFailed");
@@ -128,9 +157,9 @@ bindForm(loginForm, async (payload) => {
   await refreshSession();
 });
 
-bindForm(accountSetupForm, async ({ username, password, confirm_password }) => {
+bindForm(accountSetupForm, async ({ username, password, confirm_password, setup_code }) => {
   if (password !== confirm_password) throw new Error("passwordMismatch");
-  await submitJson("/api/v1/auth/setup-account", { username, password });
+  await submitJson("/api/v1/auth/setup-account", { username, password, setup_code });
   loginForm.elements.username.value = username;
   await refreshSession("accountSaved");
   loginForm.elements.password.focus();
@@ -346,7 +375,9 @@ function renderDownloads() {
 
 async function refresh() {
   try {
-    if (document.hidden || dialog.open || passwordDialog.open) return;
+    if (document.hidden) return;
+    if (performance.now() >= renewAt) await refreshSession("sessionExpired", true);
+    if (dialog.open || passwordDialog.open) return;
     if (!session || session.account_setup) {
       await refreshSession();
     }
@@ -355,7 +386,7 @@ async function refresh() {
     const response = await postJson("/api/v1/baidu/status", {});
     if (generation !== sessionGeneration) return;
     if (response.status === 401) {
-      await refreshSession("sessionExpired");
+      await refreshSession("sessionExpired", true);
       return;
     }
     if (!response.ok) throw new Error();

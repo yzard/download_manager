@@ -28,6 +28,6 @@ fi
 
 case "${1:-}" in
     serve) exec /usr/local/bin/download_manager ;;
-    import-baidu) exec /usr/local/bin/download_manager "$@" ;;
+    import-baidu|setup-code) exec /usr/local/bin/download_manager "$@" ;;
     *) exec /usr/local/bin/BaiduPCS-Go "$@" ;;
 esac

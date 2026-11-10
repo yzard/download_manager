@@ -35,6 +35,8 @@
         <div class="actions"><button type="submit" class="primary" data-text="login">登录</button></div>
       </form>
       <form id="account-setup-form" hidden>
+        <label><span data-text="setupCode">一次性设置码</span> <input name="setup_code" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+        <p class="muted" data-text="setupCodeHelp">在 NAS 终端运行 setup-code 命令获取设置码。</p>
         <label><span data-text="username">用户名</span> <input name="username" autocomplete="username" maxlength="64" pattern="[A-Za-z0-9._\-]+" required></label>
         <label><span data-text="password">密码</span> <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
         <label><span data-text="confirmPassword">确认密码</span> <input name="confirm_password" type="password" autocomplete="new-password" required></label>

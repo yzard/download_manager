@@ -42,7 +42,7 @@ services:
       - /data/downloads/baidu:/downloads
 ```
 
-`/data` 保存 SQLite 数据库，其中存放登录账号、常规设置和百度网盘设置。`/config` 保存 BaiduPCS-Go 的登录状态和续传配置。`/downloads` 是下载输出目录。镜像把 `HOME` 和 `BAIDUPCS_GO_CONFIG_DIR` 固定为 `/config`。
+`/data` 保存 SQLite 数据库，其中存放登录账号、会话哈希、常规设置和百度网盘设置。`/config` 保存 BaiduPCS-Go 的登录状态和续传配置。`/downloads` 是下载输出目录。镜像把 `HOME` 和 `BAIDUPCS_GO_CONFIG_DIR` 固定为 `/config`。
 
 以下命令使用 NAS 上已有的 UID `1002` 和 GID `1003`。
 
@@ -58,7 +58,13 @@ docker compose -f /data/docker/4_torrent.yaml pull download_manager
 
 ## 创建或重设登录账号
 
-首次打开网页时，创建唯一的登录账号。密码至少需要 12 个字符。保存后，网页显示登录表单。用户名和 Argon2id 密码哈希保存在 `/data/download_manager.sqlite3`。
+首次打开网页时，创建唯一的登录账号。先在 NAS 终端生成一次性设置码。
+
+```sh
+docker exec download_manager /bin/busybox sh /entrypoint.sh setup-code
+```
+
+在网页填写设置码、用户名和密码。设置码有效期为 15 分钟，密码至少需要 12 个字符。保存后，网页显示登录表单。用户名和 Argon2id 密码哈希保存在 `/data/download_manager.sqlite3`。
 
 忘记密码时，在 NAS 的服务配置中加入 `RESET_USER_PASSWORD: "true"`，然后在 NAS 运行下面的命令。
 
@@ -66,17 +72,19 @@ docker compose -f /data/docker/4_torrent.yaml pull download_manager
 docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 ```
 
-打开网页，填写用户名和新密码。保存后重设入口关闭。同一次启用期间，重启容器也会保持关闭。
+用同一条 `setup-code` 命令生成新的设置码。打开网页，填写设置码、用户名和新密码。保存后重设入口关闭。同一次启用期间，重启容器也会保持关闭。
 
 重设完成后，删除该变量并再次应用 Compose 配置。以后需要重设时，再设为 `"true"` 并应用配置。
 
-登录后可通过齿轮设置修改自己的密码。改密会结束已有会话。
+浏览器每 30 分钟更新访问令牌。登录会话从登录起有效 30 天。未过期的会话在服务重启后仍有效。退出会撤销当前会话。改密或启用重设会撤销所有会话。
 
 ## 打开网页
 
 在局域网浏览器打开 `http://192.168.1.10:8085`。将示例地址替换为你的 NAS 地址，并把相同的主机和端口填入 `WEB_ALLOWED_HOSTS`。多个地址用逗号分隔。按网页提示创建账号或登录。
 
 网页使用 `/api/v1/auth/` 和 `/api/v1/baidu/` 下的 POST 接口。浏览器会话需要同源请求。
+
+如果已有 HTTPS 反向代理，同时设置 `WEB_HTTPS_HOST` 和 `WEB_TRUSTED_PROXY`。前者是浏览器访问的域名，后者是代理连接到容器时的源 IP。代理应保留 Host，并设置 `X-Forwarded-Proto: https`。启用后，HTTP 页面会跳转到 HTTPS，HTTP 登录请求会被拒绝。
 
 ## 常规设置
 

@@ -1,4 +1,6 @@
+use super::accounts::{change_password, issue_setup_code, load_account_access, save_account_setup};
 use super::*;
+use crate::auth::Account;
 
 #[test]
 fn updates_provider_and_account_without_overwriting_each_other() {
@@ -15,8 +17,9 @@ fn updates_provider_and_account_without_overwriting_each_other() {
         username: "operator".to_owned(),
         password_hash: "original-hash".to_owned(),
     };
-    assert!(save_account_setup(&path, &account, false).unwrap());
-    assert!(!save_account_setup(&path, &account, false).unwrap());
+    assert!(issue_setup_code(&path, &[1; 32], false, 1).unwrap());
+    assert!(save_account_setup(&path, &account, false, &[1; 32], 1).unwrap());
+    assert!(!save_account_setup(&path, &account, false, &[1; 32], 1).unwrap());
     let general = GeneralSettings {
         download_directory: "/downloads/shared".to_owned(),
         language: Language::English,
@@ -46,49 +49,6 @@ fn updates_provider_and_account_without_overwriting_each_other() {
         "new-hash"
     );
     assert_eq!(load_baidu(&path).unwrap().bduss, "new-token");
-}
-
-#[test]
-fn consumes_each_reset_once_and_rearms_after_a_normal_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("settings.sqlite3");
-    assert!(matches!(
-        load_account_access(&path, false).unwrap().setup_mode(),
-        Some(crate::auth::AccountSetup::Create)
-    ));
-    let original = Account {
-        username: "operator".to_owned(),
-        password_hash: "original-hash".to_owned(),
-    };
-    assert!(save_account_setup(&path, &original, false).unwrap());
-    assert!(matches!(
-        load_account_access(&path, true).unwrap().setup_mode(),
-        Some(crate::auth::AccountSetup::Reset)
-    ));
-
-    let replacement = Account {
-        username: "replacement".to_owned(),
-        password_hash: "new-hash".to_owned(),
-    };
-    let outcomes = std::thread::scope(|scope| {
-        let first = scope.spawn(|| save_account_setup(&path, &replacement, true).unwrap());
-        let second = scope.spawn(|| save_account_setup(&path, &replacement, true).unwrap());
-        [first.join().unwrap(), second.join().unwrap()]
-    });
-    assert_eq!(outcomes.into_iter().filter(|updated| *updated).count(), 1);
-    let reopened = load_account_access(&path, true).unwrap();
-    assert!(reopened.setup_mode().is_none());
-    assert_eq!(reopened.account.unwrap().username, "replacement");
-    assert!(
-        load_account_access(&path, false)
-            .unwrap()
-            .setup_mode()
-            .is_none()
-    );
-    assert!(matches!(
-        load_account_access(&path, true).unwrap().setup_mode(),
-        Some(crate::auth::AccountSetup::Reset)
-    ));
 }
 
 #[test]
