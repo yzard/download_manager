@@ -1,8 +1,10 @@
-"use strict";
+import { translate } from "./locale.js";
 
 const dialog = document.querySelector("#settings");
 const form = document.querySelector("#settings-form");
-const error = document.querySelector("#settings-error");
+const generalForm = document.querySelector("#general-settings-form");
+const settingsDescription = document.querySelector("#settings-description");
+const settingsButton = document.querySelector("#open-settings");
 const rows = document.querySelector("#downloads");
 const empty = document.querySelector("#empty");
 const status = document.querySelector("#service-status");
@@ -13,39 +15,60 @@ const accountSetupForm = document.querySelector("#account-setup-form");
 const loginMessage = document.querySelector("#login-message");
 const passwordDialog = document.querySelector("#password-dialog");
 const passwordForm = document.querySelector("#password-form");
-const phases = {
-  setup: "等待设置", checking: "检查网盘目录", downloading: "正在下载",
-  idle: "等待下一次检查", login_failed: "百度网盘登录失败，请检查 Token",
-  download_failed: "本轮有下载错误",
-};
-const labels = {
-  queued: "排队中", active: "下载中", retrying: "正在重试",
-  complete: "已完成", existing: "已存在", failed: "失败",
-};
+let language = document.documentElement.lang;
+let general;
 let current;
 let setupShown = false;
 let session;
 let sessionGeneration = 0;
 
+function text(key) {
+  return translate(language, key);
+}
+
+function showMessage(element, key) {
+  element.dataset.message = key;
+  element.textContent = text(key) || "";
+}
+
+function applyLanguage(next) {
+  if (next === language) return;
+  language = next;
+  document.documentElement.lang = language;
+  for (const element of document.querySelectorAll("[data-text]")) {
+    element.textContent = text(element.dataset.text);
+  }
+  for (const element of document.querySelectorAll("[data-label]")) {
+    const label = text(element.dataset.label);
+    element.setAttribute("aria-label", label);
+    element.title = label;
+  }
+  for (const element of document.querySelectorAll("[data-message]")) {
+    showMessage(element, element.dataset.message);
+  }
+  if (current) renderDownloads();
+}
+
 function showSession(next, message) {
   session = next;
+  general = next.general;
+  applyLanguage(next.language);
   sessionGeneration++;
   const signedIn = Boolean(session.username);
   loginPanel.hidden = signedIn;
   accountSetupForm.hidden = !session.account_setup;
   if (!session.account_setup) accountSetupForm.reset();
   loginForm.hidden = Boolean(session.account_setup);
-  loginTitle.textContent = {create: "创建登录账号", reset: "重设登录账号"}[session.account_setup] || "登录";
+  showMessage(loginTitle, {create: "createAccount", reset: "resetAccount"}[session.account_setup] || "login");
   document.querySelector("#downloads-panel").hidden = !signedIn;
   document.querySelector("#account-actions").hidden = !signedIn;
   document.querySelector("#signed-in-user").textContent = session.username || "";
-  loginMessage.textContent = message || (session.account_setup
-    ? "密码至少需要 12 个字符。"
-    : "使用已设置的账号登录。");
+  showMessage(loginMessage, message || (session.account_setup ? "passwordMinimum" : "loginPrompt"));
   if (!signedIn) {
     passwordDialog.close();
     dialog.close();
     current = undefined;
+    settingsButton.disabled = true;
     setupShown = false;
     rows.replaceChildren();
   }
@@ -54,7 +77,7 @@ function showSession(next, message) {
 async function refreshSession(message) {
   const generation = sessionGeneration;
   const response = await postJson("/api/v1/auth/session", {});
-  if (!response.ok) throw new Error("无法连接登录服务。");
+  if (!response.ok) throw new Error("sessionUnavailable");
   const next = await response.json();
   if (generation === sessionGeneration) showSession(next, message);
 }
@@ -68,11 +91,12 @@ function postJson(path, payload) {
 }
 
 async function submitJson(path, payload) {
-  const response = await postJson(path, payload);
+  const response = await postJson(path, payload).catch(() => { throw new Error("requestFailed"); });
   if (!response.ok) {
     const details = await response.json().catch(() => ({}));
-    throw new Error(details.error || "请求失败，请稍后再试。");
+    throw new Error(text(details.error) ? details.error : "requestFailed");
   }
+  return response;
 }
 
 function bindForm(form, onSubmit) {
@@ -81,11 +105,14 @@ function bindForm(form, onSubmit) {
     const submit = form.querySelector('[type="submit"]');
     const message = form.querySelector(".error");
     submit.disabled = true;
-    message.textContent = "";
+    showMessage(message, "");
+    const saved = form.querySelector('[data-text="settingsSaved"]');
+    if (saved) saved.hidden = true;
     try {
       await onSubmit(Object.fromEntries(new FormData(form)));
+      if (saved) saved.hidden = false;
     } catch (failure) {
-      message.textContent = failure.message;
+      showMessage(message, text(failure.message) ? failure.message : "requestFailed");
     } finally {
       submit.disabled = false;
     }
@@ -99,10 +126,10 @@ bindForm(loginForm, async (payload) => {
 });
 
 bindForm(accountSetupForm, async ({ username, password, confirm_password }) => {
-  if (password !== confirm_password) throw new Error("两次输入的密码不一致。");
+  if (password !== confirm_password) throw new Error("passwordMismatch");
   await submitJson("/api/v1/auth/setup-account", { username, password });
   loginForm.elements.username.value = username;
-  await refreshSession("账号已保存，请登录。");
+  await refreshSession("accountSaved");
   loginForm.elements.password.focus();
 });
 
@@ -111,43 +138,61 @@ document.querySelector("#logout").addEventListener("click", async () => {
     await submitJson("/api/v1/auth/logout", {});
     await refreshSession();
   } catch (failure) {
-    status.textContent = failure.message;
+    showMessage(status, text(failure.message) ? failure.message : "requestFailed");
   }
 });
 
+function resetSettingsForms() {
+  for (const settingsForm of [generalForm, form]) {
+    settingsForm.reset();
+    showMessage(settingsForm.querySelector(".error"), "");
+    settingsForm.querySelector('[data-text="settingsSaved"]').hidden = true;
+  }
+}
+
 function openSettings() {
-  if (dialog.open) return;
-  form.reset();
-  error.textContent = "";
-  form.elements.monitor_directory.value = current?.monitor_directory || "";
-  form.elements.download_directory.value = current?.download_directory || "/downloads";
-  form.elements.check_interval_seconds.value = current?.check_interval_seconds ?? 300;
-  const saved = current?.has_tokens === true;
-  form.elements.bduss.required = !saved;
-  form.elements.stoken.required = !saved;
-  document.querySelector("#settings-description").textContent = saved
-    ? "留空会保留已保存的 Token。"
-    : "填入百度网盘的 BDUSS 和 STOKEN，然后设置监控目录和保存位置。";
+  if (dialog.open || !general || !current) return;
+  resetSettingsForms();
+  generalForm.elements.download_directory.value = general.download_directory;
+  generalForm.elements.language.value = general.language;
+  form.elements.monitor_directory.value = current.monitor_directory || "";
+  form.elements.check_interval_seconds.value = current.check_interval_seconds;
+  form.elements.bduss.required = !current.has_tokens;
+  form.elements.stoken.required = !current.has_tokens;
+  showMessage(settingsDescription, current.has_tokens ? "keepTokens" : "enterTokens");
   dialog.showModal();
 }
 
-document.querySelector("#open-settings").addEventListener("click", openSettings);
+settingsButton.addEventListener("click", openSettings);
 document.querySelector("#close-settings").addEventListener("click", () => dialog.close());
 
-bindForm(form, async (payload) => {
-  await submitJson("/api/v1/baidu/save-settings", {
-    ...payload,
-    check_interval_seconds: Number(payload.check_interval_seconds),
-  });
-  dialog.close();
-  status.textContent = "设置已保存";
+bindForm(generalForm, async (payload) => {
+  const response = await submitJson("/api/v1/settings/save-general", payload);
+  general = await response.json();
+  generalForm.elements.download_directory.value = general.download_directory;
+  generalForm.elements.language.value = general.language;
+  applyLanguage(general.language);
 });
 
-dialog.addEventListener("close", () => form.reset());
+bindForm(form, async (payload) => {
+  const check_interval_seconds = Number(payload.check_interval_seconds);
+  await submitJson("/api/v1/baidu/save-settings", {...payload, check_interval_seconds});
+  current.monitor_directory = payload.monitor_directory.trim();
+  current.check_interval_seconds = check_interval_seconds;
+  current.has_tokens = true;
+  current.setup_required = false;
+  for (const token of [form.elements.bduss, form.elements.stoken]) {
+    token.value = "";
+    token.required = false;
+  }
+  showMessage(settingsDescription, "keepTokens");
+});
+
+dialog.addEventListener("close", resetSettingsForms);
 
 document.querySelector("#open-password").addEventListener("click", () => {
   passwordForm.reset();
-  passwordForm.querySelector(".error").textContent = "";
+  showMessage(passwordForm.querySelector(".error"), "");
   passwordDialog.showModal();
 });
 document.querySelector("#close-password").addEventListener("click", () => passwordDialog.close());
@@ -156,7 +201,7 @@ bindForm(passwordForm, async ({ current_password, new_password, confirm_password
   if (new_password !== confirm_password) throw new Error("两次输入的新密码不一致。");
   await submitJson("/api/v1/auth/change-password", { current_password, new_password });
   passwordDialog.close();
-  await refreshSession("密码已更新，请重新登录。");
+  await refreshSession("passwordChanged");
 });
 
 function formatBytes(value) {
@@ -167,7 +212,7 @@ function formatBytes(value) {
     value /= 1024;
     unit++;
   }
-  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: unit ? 1 : 0 })
+  return new Intl.NumberFormat(language, { maximumFractionDigits: unit ? 1 : 0 })
     .format(value) + " " + units[unit];
 }
 
@@ -185,10 +230,10 @@ function renderFile(file, provider) {
     const percent = complete ? 100 : (file.total > 0 ? Math.min(100, 100 * file.downloaded / file.total) : null);
     const bar = document.createElement("progress");
     bar.max = 100;
-    bar.setAttribute("aria-label", name.textContent + " 的下载进度");
+    bar.setAttribute("aria-label", text("fileProgress").replace("{file}", () => name.textContent));
     if (percent !== null) bar.value = percent;
     const value = document.createElement("span");
-    value.textContent = percent === null ? "准备中" : percent.toFixed(1) + "%";
+    value.textContent = percent === null ? text("preparing") : percent.toFixed(1) + "%";
     progress.append(bar, value);
     if (active && file.total > 0) {
       const size = document.createElement("small");
@@ -201,10 +246,20 @@ function renderFile(file, provider) {
 
   row.insertCell().textContent = active ? formatBytes(file.speed) + "/s" : "—";
   const badge = row.insertCell();
-  badge.textContent = labels[file.status] || file.status;
-  row.insertCell().textContent = provider === "baidu" ? "百度网盘" : provider;
+  badge.textContent = text("state_" + file.status) || file.status;
+  row.insertCell().textContent = provider === "baidu" ? text("baidu") : provider;
   if (active) row.className = "active";
   return row;
+}
+
+function renderDownloads() {
+  showMessage(status, text("phase_" + current.phase) ? "phase_" + current.phase : "starting");
+  document.querySelector("#monitor-directory").textContent = current.monitor_directory || text("noMonitorDirectory");
+  const nextRows = document.createDocumentFragment();
+  for (const file of current.files) nextRows.append(renderFile(file, current.provider));
+  rows.replaceChildren(nextRows);
+  empty.hidden = current.files.length > 0;
+  showMessage(empty, current.setup_required ? "saveToStart" : "noDownloads");
 }
 
 async function refresh() {
@@ -218,26 +273,21 @@ async function refresh() {
     const response = await postJson("/api/v1/baidu/status", {});
     if (generation !== sessionGeneration) return;
     if (response.status === 401) {
-      await refreshSession("登录已过期，请重新登录。");
+      await refreshSession("sessionExpired");
       return;
     }
     if (!response.ok) throw new Error();
     const next = await response.json();
     if (generation !== sessionGeneration || dialog.open || passwordDialog.open) return;
     current = next;
-    status.textContent = phases[current.phase] || "正在启动";
-    document.querySelector("#monitor-directory").textContent = current.monitor_directory || "尚未选择监控目录";
-    const nextRows = document.createDocumentFragment();
-    for (const file of current.files) nextRows.append(renderFile(file, current.provider));
-    rows.replaceChildren(nextRows);
-    empty.hidden = current.files.length > 0;
-    empty.textContent = current.setup_required ? "保存设置后开始检查文件。" : "当前没有下载任务。";
+    settingsButton.disabled = false;
+    renderDownloads();
     if (current.setup_required && !setupShown) {
       setupShown = true;
       openSettings();
     }
   } catch {
-    (session?.username ? status : loginMessage).textContent = "连接中断，正在重试";
+    showMessage(session?.username ? status : loginMessage, "reconnecting");
   } finally {
     setTimeout(refresh, 1000);
   }

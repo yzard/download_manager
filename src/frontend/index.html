@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Download Manager</title>
   <link rel="stylesheet" href="/style.css">
-  <script src="/app.js" defer></script>
+  <script src="/app.js" type="module"></script>
 </head>
 <body>
   <main>
@@ -15,87 +15,100 @@
       </div>
       <div id="account-actions" class="account-actions" hidden>
       <span id="signed-in-user" class="muted"></span>
-      <button id="open-settings" class="icon-button" type="button" aria-label="设置" title="设置">
+      <button id="open-settings" disabled class="icon-button" type="button" aria-label="设置" title="设置" data-label="settings">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
           <path d="m10 3-.6 2.2-1.6.9-2.2-.6-2 3.5 1.6 1.6v1.8L3.6 14l2 3.5 2.2-.6 1.6.9.6 2.2h4l.6-2.2 1.6-.9 2.2.6 2-3.5-1.6-1.6v-1.8l1.6-1.6-2-3.5-2.2.6-1.6-.9L14 3z"/>
           <circle cx="12" cy="11.5" r="3"/>
         </svg>
       </button>
-      <button id="logout" type="button">退出</button>
+      <button id="logout" type="button" data-text="logout">退出</button>
       </div>
     </header>
 
     <section id="login-panel" class="panel login-panel" aria-labelledby="login-title">
-      <h2 id="login-title">登录</h2>
+      <h2 id="login-title" data-text="login">登录</h2>
       <p id="login-message" class="muted" role="status">正在连接</p>
       <form id="login-form" hidden>
-        <label>用户名 <input name="username" autocomplete="username" maxlength="64" required></label>
-        <label>密码 <input name="password" type="password" autocomplete="current-password" required></label>
+        <label><span data-text="username">用户名</span> <input name="username" autocomplete="username" maxlength="64" required></label>
+        <label><span data-text="password">密码</span> <input name="password" type="password" autocomplete="current-password" required></label>
         <p class="error" role="alert"></p>
-        <div class="actions"><button type="submit" class="primary">登录</button></div>
+        <div class="actions"><button type="submit" class="primary" data-text="login">登录</button></div>
       </form>
       <form id="account-setup-form" hidden>
-        <label>用户名 <input name="username" autocomplete="username" maxlength="64" pattern="[A-Za-z0-9._\-]+" required></label>
-        <label>密码 <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
-        <label>确认密码 <input name="confirm_password" type="password" autocomplete="new-password" required></label>
+        <label><span data-text="username">用户名</span> <input name="username" autocomplete="username" maxlength="64" pattern="[A-Za-z0-9._\-]+" required></label>
+        <label><span data-text="password">密码</span> <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label><span data-text="confirmPassword">确认密码</span> <input name="confirm_password" type="password" autocomplete="new-password" required></label>
         <p class="error" role="alert"></p>
-        <div class="actions"><button type="submit" class="primary">保存账号</button></div>
+        <div class="actions"><button type="submit" class="primary" data-text="saveAccount">保存账号</button></div>
       </form>
     </section>
 
     <section id="downloads-panel" aria-labelledby="downloads-title" class="panel" hidden>
       <div class="panel-header">
         <div>
-          <h2 id="downloads-title">百度网盘下载</h2>
+          <h2 id="downloads-title" data-text="downloads">百度网盘下载</h2>
           <p id="monitor-directory" class="muted"></p>
         </div>
         <p id="service-status" class="status" role="status">正在连接</p>
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th scope="col">文件</th><th scope="col">进度</th><th scope="col">速度</th><th scope="col">状态</th><th scope="col">来源</th></tr></thead>
+          <thead><tr><th scope="col" data-text="file">文件</th><th scope="col" data-text="progress">进度</th><th scope="col" data-text="speed">速度</th><th scope="col" data-text="status">状态</th><th scope="col" data-text="source">来源</th></tr></thead>
           <tbody id="downloads"></tbody>
         </table>
       </div>
-      <p id="empty" class="empty">正在连接下载服务</p>
+      <p id="empty" class="empty" data-text="connectingDownloads">正在连接下载服务</p>
     </section>
   </main>
 
   <dialog id="settings" aria-labelledby="settings-title">
-    <form id="settings-form" autocomplete="off">
-      <h2 id="settings-title">设置</h2>
-      <fieldset class="provider-settings">
-      <legend>百度网盘</legend>
-      <p class="muted" id="settings-description"></p>
-      <label>BDUSS <input name="bduss" type="password" spellcheck="false" maxlength="4096"></label>
-      <label>STOKEN <input name="stoken" type="password" spellcheck="false" maxlength="4096"></label>
-      <label>网盘监控目录 <input name="monitor_directory" required spellcheck="false" placeholder="/NAS下载" maxlength="4096"></label>
-      <label>下载保存位置 <input name="download_directory" required spellcheck="false" placeholder="/downloads" maxlength="4096"></label>
-      <label>检查间隔（秒） <input name="check_interval_seconds" type="number" min="1" max="4294967295" step="1" required></label>
+    <h2 id="settings-title" data-text="settings">设置</h2>
+    <form id="general-settings-form">
+      <fieldset class="settings-section">
+        <legend data-text="general">常规</legend>
+        <label><span data-text="downloadDirectory">下载保存位置</span> <input name="download_directory" required spellcheck="false" placeholder="/downloads" maxlength="4096"></label>
+        <label><span data-text="language">界面语言</span>
+          <select name="language">
+            <option value="zh-CN" lang="zh-CN">中文</option>
+            <option value="en" lang="en">English</option>
+          </select>
+        </label>
+        <p class="error" role="alert"></p>
+        <p class="muted" role="status" hidden data-text="settingsSaved">设置已保存。</p>
+        <div class="actions"><button class="primary" type="submit" data-text="saveGeneral">保存常规设置</button></div>
       </fieldset>
-      <section class="account-settings" aria-label="账号">
-        <h3>账号</h3>
-        <button id="open-password" type="button">修改登录密码</button>
-      </section>
-      <p class="provider-note muted">迅雷 · 待接入</p>
-      <p id="settings-error" class="error" role="alert"></p>
-      <div class="actions">
-        <button id="close-settings" type="button">取消</button>
-        <button class="primary" type="submit">保存</button>
-      </div>
     </form>
+    <form id="settings-form" autocomplete="off">
+      <fieldset class="settings-section">
+        <legend data-text="baidu">百度网盘</legend>
+        <p class="muted" id="settings-description"></p>
+        <label>BDUSS <input name="bduss" type="password" spellcheck="false" maxlength="4096"></label>
+        <label>STOKEN <input name="stoken" type="password" spellcheck="false" maxlength="4096"></label>
+        <label><span data-text="monitorDirectory">网盘监控目录</span> <input name="monitor_directory" required spellcheck="false" placeholder="/NAS下载" maxlength="4096"></label>
+        <label><span data-text="checkInterval">检查间隔（秒）</span> <input name="check_interval_seconds" type="number" min="1" max="4294967295" step="1" required></label>
+        <p class="error" role="alert"></p>
+        <p class="muted" role="status" hidden data-text="settingsSaved">设置已保存。</p>
+        <div class="actions"><button class="primary" type="submit" data-text="saveBaidu">保存百度设置</button></div>
+      </fieldset>
+    </form>
+    <section class="account-settings" aria-labelledby="account-settings-title">
+      <h3 id="account-settings-title" data-text="account">账号</h3>
+      <button id="open-password" type="button" data-text="changePassword">修改登录密码</button>
+    </section>
+    <p class="provider-note muted" data-text="xunlei">迅雷 · 待接入</p>
+    <div class="actions"><button id="close-settings" type="button" data-text="close">关闭</button></div>
   </dialog>
   <dialog id="password-dialog" aria-labelledby="password-title">
     <form id="password-form">
-      <h2 id="password-title">修改登录密码</h2>
-      <p class="muted">新密码至少 12 个字符。保存后请重新登录。</p>
-      <label>当前密码 <input name="current_password" type="password" autocomplete="current-password" required></label>
-      <label>新密码 <input name="new_password" type="password" autocomplete="new-password" required minlength="12"></label>
-      <label>确认新密码 <input name="confirm_password" type="password" autocomplete="new-password" required></label>
+      <h2 id="password-title" data-text="changePassword">修改登录密码</h2>
+      <p class="muted" data-text="changePasswordHint">新密码至少 12 个字符。保存后请重新登录。</p>
+      <label><span data-text="currentPassword">当前密码</span> <input name="current_password" type="password" autocomplete="current-password" required></label>
+      <label><span data-text="newPassword">新密码</span> <input name="new_password" type="password" autocomplete="new-password" required minlength="12"></label>
+      <label><span data-text="confirmNewPassword">确认新密码</span> <input name="confirm_password" type="password" autocomplete="new-password" required></label>
       <p class="error" role="alert"></p>
       <div class="actions">
-        <button id="close-password" type="button">取消</button>
-        <button class="primary" type="submit">保存密码</button>
+        <button id="close-password" type="button" data-text="cancel">取消</button>
+        <button class="primary" type="submit" data-text="savePassword">保存密码</button>
       </div>
     </form>
   </dialog>

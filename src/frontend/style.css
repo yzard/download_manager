@@ -33,24 +33,24 @@ td:nth-child(n+3) { white-space: nowrap; }
 progress { width: 100px; height: 8px; accent-color: var(--accent); vertical-align: middle; margin-right: 7px; }
 small { display: block; color: var(--muted); margin-top: 2px; }
 .empty { text-align: center; padding: 36px 18px; }
-button, input { font: inherit; color: inherit; border: 1px solid var(--border); border-radius: 8px; }
+button, input, select { font: inherit; color: inherit; border: 1px solid var(--border); border-radius: 8px; }
 button { padding: 8px 14px; cursor: pointer; background: white; }
 button:hover { background: #ecf4f7; }
-button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .icon-button { padding: 9px; line-height: 0; }
 dialog { color: inherit; width: min(440px, calc(100% - 32px)); padding: 24px; border: 1px solid var(--border); border-radius: 13px; }
 dialog::backdrop { background: #152d3e77; }
 form > .muted { margin: 6px 0 16px; }
 label { display: block; margin-top: 12px; font-weight: 600; }
-input { display: block; width: 100%; margin-top: 4px; padding: 9px; font-weight: 400; }
+input, select { display: block; width: 100%; margin-top: 4px; padding: 9px; font-weight: 400; }
 .actions { justify-content: flex-end; margin-top: 15px; }
 .primary { color: white; background: var(--accent); border-color: var(--accent); }
 .primary:hover { background: #064d68; }
 .error { color: #a62a31; margin-top: 8px; }
 .login-panel { max-width: 420px; margin: 48px auto; padding: 24px; }
 .login-panel > .muted, .provider-note { margin-top: 8px; }
-.provider-settings { border: 1px solid var(--border); border-radius: 8px; margin: 16px 0; padding: 14px; }
-.provider-settings legend { font-weight: 650; padding: 0 6px; }
+.settings-section { border: 1px solid var(--border); border-radius: 8px; margin: 16px 0; padding: 14px; }
+.settings-section legend { font-weight: 650; padding: 0 6px; }
 .account-settings { border-top: 1px solid var(--border); padding-top: 12px; }
 .account-settings h3 { font-size: 14px; margin: 0 0 8px; }
 @media (max-width: 580px) {

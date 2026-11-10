@@ -1,6 +1,6 @@
 use crate::{
     auth::{Account, AccountAccess},
-    settings::BaiduSettings,
+    settings::{BaiduSettings, GeneralSettings, Language},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
@@ -9,10 +9,23 @@ const LOAD_BAIDU: &str = "
 SELECT bduss
      , stoken
      , monitor_directory
-     , download_directory
      , check_interval_seconds
   FROM baidu_settings
  WHERE singleton = 1";
+
+const LOAD_GENERAL: &str = "
+SELECT download_directory
+     , language
+  FROM general_settings
+ WHERE singleton = 1";
+
+const SAVE_GENERAL: &str = "
+INSERT INTO general_settings (singleton, download_directory, language)
+VALUES (1, ?1, ?2)
+ON CONFLICT (singleton) DO UPDATE
+SET download_directory = excluded.download_directory
+  , language = excluded.language
+WHERE ?3";
 
 const LOAD_ACCOUNT: &str = "
 SELECT username
@@ -47,17 +60,15 @@ INSERT INTO baidu_settings (
   , bduss
   , stoken
   , monitor_directory
-  , download_directory
   , check_interval_seconds
 )
-VALUES (1, ?1, ?2, ?3, ?4, ?5)
+VALUES (1, ?1, ?2, ?3, ?4)
 ON CONFLICT (singleton) DO UPDATE
 SET bduss = excluded.bduss
   , stoken = excluded.stoken
   , monitor_directory = excluded.monitor_directory
-  , download_directory = excluded.download_directory
   , check_interval_seconds = excluded.check_interval_seconds
-WHERE ?6 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
+WHERE ?5 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
 
 fn connect(path: &Path) -> io::Result<Connection> {
     OpenOptions::new()
@@ -70,29 +81,36 @@ fn connect(path: &Path) -> io::Result<Connection> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(io::Error::other)?;
-    if schema_version(&connection)? != 2 {
+    if schema_version(&connection)? != 3 {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io::Error::other)?;
-        let schema = match schema_version(&transaction)? {
-            0 => include_str!("../schema.sql"),
-            1 => include_str!("../migrations/002_account_reset_and_baidu_interval.sql"),
-            2 => {
-                transaction.commit().map_err(io::Error::other)?;
-                return Ok(connection);
+        let version = schema_version(&transaction)?;
+        match version {
+            0 => transaction.execute_batch(include_str!("../schema.sql")),
+            1 | 2 => {
+                if version == 1 {
+                    transaction
+                        .execute_batch(include_str!(
+                            "../migrations/002_account_reset_and_baidu_interval.sql"
+                        ))
+                        .map_err(io::Error::other)?;
+                }
+                transaction.execute_batch(include_str!("../migrations/003_general_settings.sql"))
             }
+            3 => Ok(()),
             _ => {
                 return Err(io::Error::other(
                     "Database schema is newer than this Download Manager version",
                 ));
             }
-        };
-        transaction
-            .execute_batch(schema)
-            .map_err(io::Error::other)?;
-        transaction
-            .pragma_update(None, "user_version", 2)
-            .map_err(io::Error::other)?;
+        }
+        .map_err(io::Error::other)?;
+        if version < 3 {
+            transaction
+                .pragma_update(None, "user_version", 3)
+                .map_err(io::Error::other)?;
+        }
         transaction.commit().map_err(io::Error::other)?;
     }
     Ok(connection)
@@ -111,13 +129,52 @@ pub fn load_baidu(path: &Path) -> io::Result<BaiduSettings> {
                 bduss: row.get(0)?,
                 stoken: row.get(1)?,
                 monitor_directory: row.get(2)?,
-                download_directory: row.get(3)?,
-                check_interval_seconds: row.get(4)?,
+                check_interval_seconds: row.get(3)?,
             })
         })
         .optional()
         .map_err(io::Error::other)?
         .unwrap_or_default())
+}
+
+pub fn load_general(path: &Path) -> io::Result<GeneralSettings> {
+    Ok(connect(path)?
+        .query_row(LOAD_GENERAL, [], |row| {
+            let language = match row.get::<_, String>(1)?.as_str() {
+                "zh-CN" => Language::Chinese,
+                "en" => Language::English,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok(GeneralSettings {
+                download_directory: row.get(0)?,
+                language,
+            })
+        })
+        .optional()
+        .map_err(io::Error::other)?
+        .unwrap_or_default())
+}
+
+pub fn save_general(path: &Path, settings: &GeneralSettings) -> io::Result<()> {
+    write_general(&connect(path)?, settings, true)
+}
+
+fn write_general(
+    connection: &Connection,
+    settings: &GeneralSettings,
+    replace_existing: bool,
+) -> io::Result<()> {
+    connection
+        .execute(
+            SAVE_GENERAL,
+            params![
+                settings.download_directory,
+                settings.language.code(),
+                replace_existing
+            ],
+        )
+        .map(|_| ())
+        .map_err(io::Error::other)
 }
 
 pub fn load_account_access(path: &Path, reset_requested: bool) -> io::Result<AccountAccess> {
@@ -179,21 +236,39 @@ pub fn change_password(path: &Path, current_hash: &str, new_hash: &str) -> io::R
     Ok(())
 }
 
-pub fn save_baidu(
+pub fn save_baidu(path: &Path, settings: &BaiduSettings) -> io::Result<()> {
+    write_baidu(&connect(path)?, settings, true).map(|_| ())
+}
+
+pub fn import_baidu(
     path: &Path,
+    baidu: &BaiduSettings,
+    general: &GeneralSettings,
+) -> io::Result<bool> {
+    let mut connection = connect(path)?;
+    let transaction = connection.transaction().map_err(io::Error::other)?;
+    if !write_baidu(&transaction, baidu, false)? {
+        return Ok(false);
+    }
+    write_general(&transaction, general, false)?;
+    transaction.commit().map_err(io::Error::other)?;
+    Ok(true)
+}
+
+fn write_baidu(
+    connection: &Connection,
     settings: &BaiduSettings,
     replace_existing: bool,
 ) -> io::Result<bool> {
-    connect(path)?
+    connection
         .execute(
             SAVE_BAIDU,
             params![
                 settings.bduss,
                 settings.stoken,
                 settings.monitor_directory,
-                settings.download_directory,
                 settings.check_interval_seconds,
-                replace_existing,
+                replace_existing
             ],
         )
         .map(|count| count == 1)

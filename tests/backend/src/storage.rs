@@ -17,17 +17,26 @@ fn updates_provider_and_account_without_overwriting_each_other() {
     };
     assert!(save_account_setup(&path, &account, false).unwrap());
     assert!(!save_account_setup(&path, &account, false).unwrap());
-    assert!(save_baidu(&path, &settings, false).unwrap());
+    let general = GeneralSettings {
+        download_directory: "/downloads/shared".to_owned(),
+        language: Language::English,
+    };
+    save_general(&path, &general).unwrap();
+    assert!(import_baidu(&path, &settings, &GeneralSettings::default()).unwrap());
     assert_eq!(load_baidu(&path).unwrap().bduss, "token-one");
-    assert_eq!(load_baidu(&path).unwrap().download_directory, "/downloads");
+    assert_eq!(
+        load_general(&path).unwrap().download_directory,
+        "/downloads/shared"
+    );
     assert_eq!(load_baidu(&path).unwrap().check_interval_seconds, 123);
 
     settings.bduss = "new-token".to_owned();
-    assert!(!save_baidu(&path, &settings, false).unwrap());
+    assert!(!import_baidu(&path, &settings, &GeneralSettings::default()).unwrap());
     assert_eq!(load_baidu(&path).unwrap().bduss, "token-one");
     change_password(&path, "original-hash", "new-hash").unwrap();
     assert!(change_password(&path, "original-hash", "stale-hash").is_err());
-    assert!(save_baidu(&path, &settings, true).unwrap());
+    save_baidu(&path, &settings).unwrap();
+    assert_eq!(load_general(&path).unwrap().language.code(), "en");
     assert_eq!(
         load_account_access(&path, false)
             .unwrap()
@@ -114,7 +123,9 @@ fn migrates_version_one_without_losing_account_or_baidu_settings() {
     assert_eq!(settings.bduss, "one");
     assert_eq!(settings.stoken, "two");
     assert_eq!(settings.monitor_directory, "/NAS下载");
-    assert_eq!(settings.download_directory, "/downloads/archive");
+    let general = load_general(&path).unwrap();
+    assert_eq!(general.download_directory, "/downloads/archive");
+    assert_eq!(general.language.code(), "zh-CN");
     let access = load_account_access(&path, false).unwrap();
     assert!(access.setup_mode().is_none());
     assert_eq!(access.account.unwrap().password_hash, "existing-hash");

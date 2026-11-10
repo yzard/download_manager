@@ -1,4 +1,4 @@
-use crate::settings::{BaiduSettings, save_private};
+use crate::settings::{BaiduSettings, GeneralSettings, Settings, save_private};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, io, path::Path, process::Stdio, time::Duration};
@@ -200,12 +200,16 @@ async fn login(settings: &BaiduSettings) -> io::Result<bool> {
     Ok(true)
 }
 
-async fn download(settings: &BaiduSettings, status: &RwLock<Snapshot>) -> io::Result<bool> {
-    let destination = settings.clone();
+async fn download(
+    baidu: &BaiduSettings,
+    general: &GeneralSettings,
+    status: &RwLock<Snapshot>,
+) -> io::Result<bool> {
+    let destination = general.clone();
     tokio::task::spawn_blocking(move || destination.prepare_destination())
         .await
         .map_err(io::Error::other)??;
-    if !login(settings).await? {
+    if !login(baidu).await? {
         status.write().await.phase = "login_failed";
         return Ok(false);
     }
@@ -217,8 +221,8 @@ async fn download(settings: &BaiduSettings, status: &RwLock<Snapshot>) -> io::Re
             CLI,
             "download",
             "--saveto",
-            &settings.download_directory,
-            &settings.monitor_directory,
+            &general.download_directory,
+            &baidu.monitor_directory,
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -260,15 +264,15 @@ async fn download(settings: &BaiduSettings, status: &RwLock<Snapshot>) -> io::Re
     Ok(child.wait().await?.success())
 }
 
-pub async fn run(mut settings: watch::Receiver<BaiduSettings>, status: &RwLock<Snapshot>) {
+pub async fn run(mut settings: watch::Receiver<Settings>, status: &RwLock<Snapshot>) {
     loop {
         let current = settings.borrow_and_update().clone();
-        if current.ready() {
+        if current.baidu.ready() {
             *status.write().await = Snapshot {
                 phase: "checking",
                 ..Snapshot::default()
             };
-            let result = match download(&current, status).await {
+            let result = match download(&current.baidu, &current.general, status).await {
                 Ok(completed) => completed,
                 Err(error) => {
                     eprintln!("Baidu download check failed: {error}");
@@ -295,7 +299,7 @@ pub async fn run(mut settings: watch::Receiver<BaiduSettings>, status: &RwLock<S
         }
         tokio::select! {
             changed = settings.changed() => if changed.is_err() { return },
-            () = tokio::time::sleep(Duration::from_secs(u64::from(current.check_interval_seconds))) => {},
+            () = tokio::time::sleep(Duration::from_secs(u64::from(current.baidu.check_interval_seconds))) => {},
         }
     }
 }

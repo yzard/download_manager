@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{fs, io, io::Write, path::Path};
 
 pub const DEFAULT_CHECK_INTERVAL_SECONDS: u32 = 300;
@@ -7,7 +8,6 @@ pub struct BaiduSettings {
     pub bduss: String,
     pub stoken: String,
     pub monitor_directory: String,
-    pub download_directory: String,
     pub check_interval_seconds: u32,
 }
 
@@ -17,7 +17,6 @@ impl Default for BaiduSettings {
             bduss: String::new(),
             stoken: String::new(),
             monitor_directory: String::new(),
-            download_directory: "/downloads".to_owned(),
             check_interval_seconds: DEFAULT_CHECK_INTERVAL_SECONDS,
         }
     }
@@ -38,7 +37,7 @@ impl BaiduSettings {
                 token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control())
             })
         {
-            return Err("请填写有效的 BDUSS 和 STOKEN。");
+            return Err("invalidTokens");
         }
         if !self.monitor_directory.starts_with('/')
             || self.monitor_directory.len() > 4096
@@ -49,8 +48,51 @@ impl BaiduSettings {
                 .any(|part| matches!(part, "." | ".."))
             || self.monitor_directory.contains(['*', '?', '[', ']', '\\'])
         {
-            return Err("请填写百度网盘里的绝对目录，例如 /NAS下载。目录不能包含通配符。");
+            return Err("invalidMonitorDirectory");
         }
+        if self.check_interval_seconds == 0 {
+            return Err("invalidCheckInterval");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+pub enum Language {
+    #[default]
+    #[serde(rename = "zh-CN")]
+    Chinese,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl Language {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Chinese => "zh-CN",
+            Self::English => "en",
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneralSettings {
+    pub download_directory: String,
+    pub language: Language,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            download_directory: "/downloads".to_owned(),
+            language: Language::default(),
+        }
+    }
+}
+
+impl GeneralSettings {
+    pub fn validate(&self) -> Result<(), &'static str> {
         if !Path::new(&self.download_directory).starts_with("/downloads")
             || self.download_directory.len() > 4096
             || self.download_directory.chars().any(char::is_control)
@@ -59,10 +101,7 @@ impl BaiduSettings {
                 .split('/')
                 .any(|part| matches!(part, "." | ".."))
         {
-            return Err("保存位置必须是 /downloads 或其下的子目录。");
-        }
-        if self.check_interval_seconds == 0 {
-            return Err("检查间隔至少为 1 秒。");
+            return Err("invalidDownloadDirectory");
         }
         Ok(())
     }
@@ -90,6 +129,12 @@ impl BaiduSettings {
         }
         Ok(())
     }
+}
+
+#[derive(Clone)]
+pub struct Settings {
+    pub general: GeneralSettings,
+    pub baidu: BaiduSettings,
 }
 
 pub fn save_private(path: &Path, bytes: &[u8]) -> io::Result<()> {

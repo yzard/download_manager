@@ -42,7 +42,7 @@ services:
       - /data/downloads/baidu:/downloads
 ```
 
-`/data` 保存 SQLite 数据库，其中分别存放允许登录的账号和百度专属设置。`/config` 保存 BaiduPCS-Go 的登录状态和续传配置。`/downloads` 是下载输出目录。镜像把 `HOME` 和 `BAIDUPCS_GO_CONFIG_DIR` 固定为 `/config`。
+`/data` 保存 SQLite 数据库，其中存放登录账号、常规设置和百度网盘设置。`/config` 保存 BaiduPCS-Go 的登录状态和续传配置。`/downloads` 是下载输出目录。镜像把 `HOME` 和 `BAIDUPCS_GO_CONFIG_DIR` 固定为 `/config`。
 
 以下命令使用 NAS 上已有的 UID `1002` 和 GID `1003`。
 
@@ -78,13 +78,16 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 
 网页使用 `/api/v1/auth/` 和 `/api/v1/baidu/` 下的 POST 接口。浏览器会话需要同源请求。
 
+## 常规设置
+
+登录后，打开右上角的齿轮。在「常规」里选择下载保存位置和界面语言，然后保存。保存位置可以是 `/downloads` 或其子目录，例如 `/downloads/archive`。界面支持中文和英语。两项设置都存入 SQLite。
+
 ## 百度专属设置
 
 登录后，如果缺少 Token，网页会自动打开设置窗口。在“百度网盘”区域填写以下内容。
 
 - `BDUSS` 和 `STOKEN` 是百度网盘的登录凭据。
 - 网盘监控目录是百度网盘上的绝对路径，例如 `/NAS下载`。
-- 下载保存位置是容器中的 `/downloads` 或其子目录，例如 `/downloads/archive`。
 - 检查间隔以秒为单位，默认 300 秒。
 
 保存后，设置写入 SQLite。后续通过右上角齿轮修改。已有 Token 时，输入框留空会保留原值。设置在当前下载轮次结束后应用。
