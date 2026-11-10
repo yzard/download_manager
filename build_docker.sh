@@ -11,5 +11,14 @@ case "$#:${1:-}" in
         exec docker buildx build --platform linux/amd64,linux/arm64 \
             --label "$source_label" --tag "$image" --push .
         ;;
-    *) echo "Usage: $0 [--publish]" >&2; exit 2 ;;
+    3:--publish-platform)
+        case "$2" in
+            linux/amd64|linux/arm64) ;;
+            *) echo "Unsupported publish platform: $2" >&2; exit 2 ;;
+        esac
+        exec docker buildx build --platform "$2" --metadata-file "$3" \
+            --label "$source_label" \
+            --output "type=image,name=${image%:*},push-by-digest=true,name-canonical=true,push=true" .
+        ;;
+    *) echo "Usage: $0 [--publish | --publish-platform PLATFORM METADATA_FILE]" >&2; exit 2 ;;
 esac

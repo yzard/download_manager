@@ -26,20 +26,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
-        with:
-          platforms: arm64
       - name: Log in to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Build and publish
+      - name: Build and publish platform image
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           docker buildx create --driver docker-container --use
-          ./build_docker.sh --publish
+          ./build_docker.sh --publish-platform "linux/$ARCH" "$RUNNER_TEMP/metadata.json"
+          jq -er '."containerimage.digest"' "$RUNNER_TEMP/metadata.json" > "digest-$ARCH.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digest-${{ matrix.arch }}.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: digest-*
+          merge-multiple: true
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish the multi-platform tag
+        run: |
+          image=ghcr.io/yzard/download_manager
+          for arch in amd64 arm64; do
+            grep -Eq '^sha256:[0-9a-f]{64}$' "digest-$arch.txt"
+          done
+          docker buildx imagetools create --tag "$image:4.0.2" \
+            "$image@$(cat digest-amd64.txt)" "$image@$(cat digest-arm64.txt)"
