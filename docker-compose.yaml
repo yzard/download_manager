@@ -1,0 +1,9 @@
+services:
+  baidupcs-go:
+    image: ghcr.io/yzard/baidupcs-go-srv:4.0.2
+    env_file:
+      - ./.env
+    volumes:
+      - ./config:/config
+      - /data/downloads/baidu:/downloads
+    restart: always
