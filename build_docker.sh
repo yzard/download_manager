@@ -2,7 +2,7 @@
 set -eu
 
 cd "$(dirname "$0")"
-image=ghcr.io/yzard/baidupcs-go-srv:4.0.2
+image=ghcr.io/yzard/download-manager:4.0.2
 source_label=org.opencontainers.image.source=https://github.com/yzard/BaiduPCS-go-srv
 
 case "$#:${1:-}" in

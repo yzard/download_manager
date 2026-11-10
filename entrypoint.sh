@@ -55,42 +55,9 @@ login_from_environment() {
     fi
 }
 
-stop_service() {
-    if [ -n "$worker_pid" ]; then
-        kill -TERM "$worker_pid" 2>/dev/null || true
-        wait "$worker_pid" 2>/dev/null || true
-    fi
-    exit 0
-}
-
-serve() {
-    poll_interval=${CHECK_INTERVAL_SECONDS:-300}
-    case "$poll_interval" in
-        *[!0-9]*) echo "CHECK_INTERVAL_SECONDS must be a positive integer." >&2; return 2 ;;
-    esac
-    if ! [ "$poll_interval" -gt 0 ] 2>/dev/null; then
-        echo "CHECK_INTERVAL_SECONDS must be a positive integer." >&2
-        return 2
-    fi
-
-    worker_pid=
-    trap stop_service TERM INT
-    printf 'Baidu download service started. Poll interval: %s seconds.\n' "$poll_interval"
-    while :; do
-        /bin/busybox sh /entrypoint.sh auto-download &
-        worker_pid=$!
-        wait "$worker_pid" || true
-        worker_pid=
-
-        /bin/busybox sleep "$poll_interval" &
-        worker_pid=$!
-        wait "$worker_pid" || true
-        worker_pid=
-    done
-}
-
 case "${1:-}" in
-    serve) serve ;;
+    serve) exec /usr/local/bin/download-manager ;;
+    init-user) exec /usr/local/bin/download-manager "$@" ;;
     login-env)
         if [ "$#" -ne 1 ]; then
             echo "Usage: login-env" >&2

@@ -1,9 +1,11 @@
 services:
-  baidupcs-go:
-    image: ghcr.io/yzard/baidupcs-go-srv:4.0.2
+  download-manager:
+    image: ghcr.io/yzard/download-manager:4.0.2
     env_file:
       - ./.env
     volumes:
       - ./config:/config
       - /data/downloads/baidu:/downloads
+    ports:
+      - "127.0.0.1:8085:8080"
     restart: always

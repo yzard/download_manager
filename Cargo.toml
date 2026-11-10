@@ -1,0 +1,18 @@
+[package]
+name = "download-manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argon2 = "0.5"
+getrandom = "0.4"
+rpassword = "7"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "process", "signal", "sync", "time"] }
+toml = "0.9"
+
+[profile.release]
+strip = true
+lto = "thin"

@@ -1,4 +1,4 @@
-name: Publish container image
+name: Publish Download Manager image
 
 on:
   push:
@@ -6,6 +6,10 @@ on:
     paths:
       - Dockerfile
       - entrypoint.sh
+      - Cargo.toml
+      - Cargo.lock
+      - 'src/**'
+      - 'web/**'
       - LICENSE.BaiduPCS-Go
       - Dockerfile.dockerignore
       - build_docker.sh
@@ -23,6 +27,9 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        with:
+          platforms: arm64
       - name: Log in to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

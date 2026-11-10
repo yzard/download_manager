@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Download Manager</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div>
+        <h1>Download Manager</h1>
+      </div>
+      <div id="account-actions" class="account-actions" hidden>
+      <span id="signed-in-user" class="muted"></span>
+      <button id="open-settings" class="icon-button" type="button" aria-label="设置" title="设置">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+          <path d="m10 3-.6 2.2-1.6.9-2.2-.6-2 3.5 1.6 1.6v1.8L3.6 14l2 3.5 2.2-.6 1.6.9.6 2.2h4l.6-2.2 1.6-.9 2.2.6 2-3.5-1.6-1.6v-1.8l1.6-1.6-2-3.5-2.2.6-1.6-.9L14 3z"/>
+          <circle cx="12" cy="11.5" r="3"/>
+        </svg>
+      </button>
+      <button id="logout" type="button">退出</button>
+      </div>
+    </header>
+
+    <section id="login-panel" class="panel login-panel" aria-labelledby="login-title">
+      <h2 id="login-title">登录</h2>
+      <p id="login-message" class="muted" role="status">正在连接</p>
+      <form id="login-form" hidden>
+        <label>用户名 <input name="username" autocomplete="username" maxlength="64" required></label>
+        <label>密码 <input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="error" role="alert"></p>
+        <div class="actions"><button type="submit" class="primary">登录</button></div>
+      </form>
+    </section>
+
+    <section id="downloads-panel" aria-labelledby="downloads-title" class="panel" hidden>
+      <div class="panel-header">
+        <div>
+          <h2 id="downloads-title">百度网盘下载</h2>
+          <p id="monitor-directory" class="muted"></p>
+        </div>
+        <p id="service-status" class="status" role="status">正在连接</p>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">文件</th><th scope="col">进度</th><th scope="col">速度</th><th scope="col">状态</th><th scope="col">来源</th></tr></thead>
+          <tbody id="downloads"></tbody>
+        </table>
+      </div>
+      <p id="empty" class="empty">正在连接下载服务</p>
+    </section>
+  </main>
+
+  <dialog id="settings" aria-labelledby="settings-title">
+    <form id="settings-form" autocomplete="off">
+      <h2 id="settings-title">百度网盘设置</h2>
+      <p class="muted" id="settings-description"></p>
+      <label>BDUSS <input name="bduss" type="password" spellcheck="false" maxlength="4096"></label>
+      <label>STOKEN <input name="stoken" type="password" spellcheck="false" maxlength="4096"></label>
+      <label>网盘监控目录 <input name="monitor_directory" required spellcheck="false" placeholder="/NAS下载" maxlength="4096"></label>
+      <p class="provider-note muted">迅雷 · 待接入</p>
+      <p id="settings-error" class="error" role="alert"></p>
+      <div class="actions">
+        <button id="open-password" class="password-link" type="button">修改登录密码</button>
+        <button id="close-settings" type="button">取消</button>
+        <button class="primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="password-dialog" aria-labelledby="password-title">
+    <form id="password-form">
+      <h2 id="password-title">修改登录密码</h2>
+      <p class="muted">新密码至少 12 个字符。保存后请重新登录。</p>
+      <label>当前密码 <input name="current_password" type="password" autocomplete="current-password" required></label>
+      <label>新密码 <input name="new_password" type="password" autocomplete="new-password" required minlength="12"></label>
+      <label>确认新密码 <input name="confirm_password" type="password" autocomplete="new-password" required></label>
+      <p class="error" role="alert"></p>
+      <div class="actions">
+        <button id="close-password" type="button">取消</button>
+        <button class="primary" type="submit">保存密码</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -23,19 +23,33 @@ RUN set -eu; \
 
 FROM busybox:1.37.0-musl AS runtime-tools
 
+FROM rust:1.99-alpine AS web-build
+ARG TARGETARCH
+RUN apk add --no-cache musl-dev
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY web/ ./web/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=download-manager-${TARGETARCH},target=/build/target \
+    cargo build --locked --release && cp target/release/download-manager /download-manager
+
 FROM scratch
 
 COPY --from=download /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=download /usr/share/zoneinfo/ /usr/share/zoneinfo/
 COPY --from=runtime-tools /bin/busybox /bin/busybox
 COPY --from=download /usr/local/bin/BaiduPCS-Go /usr/local/bin/BaiduPCS-Go
+COPY --from=web-build /download-manager /usr/local/bin/download-manager
 COPY --from=download --chown=1000:1000 /rootfs/ /
 COPY entrypoint.sh /entrypoint.sh
 COPY LICENSE.BaiduPCS-Go /licenses/BaiduPCS-Go.txt
 
 ENV HOME=/config \
-    BAIDUPCS_GO_CONFIG_DIR=/config
+    BAIDUPCS_GO_CONFIG_DIR=/config \
+    WEB_BIND=0.0.0.0:8080
 WORKDIR /downloads
+EXPOSE 8080
 
 ENTRYPOINT ["/bin/busybox", "sh", "/entrypoint.sh"]
 CMD ["serve"]
