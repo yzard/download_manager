@@ -56,15 +56,22 @@
 
   <dialog id="settings" aria-labelledby="settings-title">
     <form id="settings-form" autocomplete="off">
-      <h2 id="settings-title">百度网盘设置</h2>
+      <h2 id="settings-title">设置</h2>
+      <fieldset class="provider-settings">
+      <legend>百度网盘</legend>
       <p class="muted" id="settings-description"></p>
       <label>BDUSS <input name="bduss" type="password" spellcheck="false" maxlength="4096"></label>
       <label>STOKEN <input name="stoken" type="password" spellcheck="false" maxlength="4096"></label>
       <label>网盘监控目录 <input name="monitor_directory" required spellcheck="false" placeholder="/NAS下载" maxlength="4096"></label>
+      <label>下载保存位置 <input name="download_directory" required spellcheck="false" placeholder="/downloads" maxlength="4096"></label>
+      </fieldset>
+      <section class="account-settings" aria-label="账号">
+        <h3>账号</h3>
+        <button id="open-password" type="button">修改登录密码</button>
+      </section>
       <p class="provider-note muted">迅雷 · 待接入</p>
       <p id="settings-error" class="error" role="alert"></p>
       <div class="actions">
-        <button id="open-password" class="password-link" type="button">修改登录密码</button>
         <button id="close-settings" type="button">取消</button>
         <button class="primary" type="submit">保存</button>
       </div>

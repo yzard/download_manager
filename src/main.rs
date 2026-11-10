@@ -1,5 +1,6 @@
 mod auth;
 mod settings;
+mod storage;
 mod worker;
 
 use axum::{
@@ -16,7 +17,7 @@ use settings::Settings;
 use std::{
     env,
     fs::OpenOptions,
-    io,
+    io::{self, Read},
     os::unix::fs::OpenOptionsExt,
     path::Path,
     sync::Arc,
@@ -29,7 +30,7 @@ use tokio::{
 };
 use worker::{Download, Snapshot};
 
-const CONFIG: &str = "/config/config.toml";
+const CONFIG: &str = "/data/download_manager.sqlite3";
 
 #[derive(Clone)]
 struct AppState {
@@ -45,6 +46,7 @@ struct Status {
     has_tokens: bool,
     setup_required: bool,
     monitor_directory: String,
+    download_directory: String,
     phase: &'static str,
     files: Vec<Download>,
 }
@@ -57,6 +59,7 @@ async fn status(State(state): State<AppState>, _session: Session) -> Json<Status
         has_tokens: settings.has_tokens(),
         setup_required: !settings.ready(),
         monitor_directory: settings.monitor_directory.clone(),
+        download_directory: settings.download_directory.clone(),
         phase: if settings.ready() {
             snapshot.phase
         } else {
@@ -74,6 +77,7 @@ struct SettingsInput {
     #[serde(default)]
     stoken: String,
     monitor_directory: String,
+    download_directory: String,
 }
 
 struct AppError(StatusCode, &'static str);
@@ -266,19 +270,24 @@ async fn save_settings(
         settings.stoken = input.stoken.trim().to_owned();
     }
     settings.monitor_directory = input.monitor_directory.trim().to_owned();
+    settings.download_directory = input.download_directory.trim().to_owned();
     settings
         .validate()
         .map_err(|error| AppError(StatusCode::BAD_REQUEST, error))?;
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        settings.save(Path::new(CONFIG))?;
+        settings.prepare_destination().map_err(|_| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                "无法使用这个保存目录，请检查它是否为真实目录，以及容器是否有写入权限。",
+            )
+        })?;
+        settings.save(Path::new(CONFIG)).map_err(|_| save_error())?;
         state.settings.send_replace(settings);
-        Ok::<_, io::Error>(())
+        Ok::<_, AppError>(())
     })
     .await
-    .ok()
-    .and_then(Result::ok)
-    .ok_or_else(save_error)?;
+    .map_err(|_| save_error())??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -370,9 +379,10 @@ async fn main() -> io::Result<()> {
     match args.as_slice() {
         [] => {}
         [command, username] if command == "init-user" => return init_user(username),
+        [command] if command == "import-baidu" => return import_baidu(),
         _ => {
             return Err(io::Error::other(
-                "Usage: download-manager [init-user USERNAME]",
+                "Usage: download_manager [init-user USERNAME]",
             ));
         }
     }
@@ -421,7 +431,7 @@ fn init_user(username: &str) -> io::Result<()> {
         .truncate(false)
         .write(true)
         .mode(0o600)
-        .open("/config/.account-init.lock")?;
+        .open("/data/.account-init.lock")?;
     lock.lock()?;
     let path = Path::new(CONFIG);
     let mut settings = Settings::load(path).map_err(io::Error::other)?;
@@ -445,5 +455,28 @@ fn init_user(username: &str) -> io::Result<()> {
     });
     settings.save(path)?;
     println!("Allowed account configured. Restart Download Manager to load it.");
+    Ok(())
+}
+
+fn import_baidu() -> io::Result<()> {
+    let mut input = String::new();
+    io::stdin().take(24 * 1024 + 1).read_to_string(&mut input)?;
+    if input.len() > 24 * 1024 {
+        return Err(io::Error::other("Import input is too large"));
+    }
+    let input: SettingsInput =
+        serde_json::from_str(&input).map_err(|_| io::Error::other("Invalid Baidu import input"))?;
+    let path = Path::new(CONFIG);
+    let mut settings = Settings::load(path)?;
+    if settings.has_tokens() {
+        return Err(io::Error::other("Baidu settings are already configured"));
+    }
+    settings.bduss = input.bduss;
+    settings.stoken = input.stoken;
+    settings.monitor_directory = input.monitor_directory;
+    settings.download_directory = input.download_directory;
+    settings.validate().map_err(io::Error::other)?;
+    settings.save(path)?;
+    println!("Baidu settings imported into SQLite.");
     Ok(())
 }

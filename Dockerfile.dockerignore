@@ -3,5 +3,6 @@
 .env.*
 config/
 downloads/
+data/
 target/
 *.log

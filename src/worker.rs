@@ -1,11 +1,15 @@
-use crate::settings::Settings;
+use crate::settings::{Settings, save_private};
 use serde::Serialize;
-use std::{collections::BTreeMap, io, process::Stdio, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fs, io, path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::AsyncReadExt,
     process::Command,
     sync::{RwLock, watch},
 };
+
+const CLI: &str = "/usr/local/bin/BaiduPCS-Go";
+const LOGIN_HASH: &str = "/config/.login-hash";
 
 #[derive(Clone, Serialize)]
 pub struct Download {
@@ -157,16 +161,65 @@ fn human_bytes(value: &str) -> Option<u64> {
     Some((number * 1024_f64.powi(power)).round() as u64)
 }
 
+async fn login(settings: &Settings) -> io::Result<bool> {
+    let mut hash = Sha256::new();
+    hash.update(settings.bduss.as_bytes());
+    hash.update(b"\n");
+    hash.update(settings.stoken.as_bytes());
+    let fingerprint = format!("{:x}", hash.finalize());
+    let cached = tokio::task::spawn_blocking({
+        let fingerprint = fingerprint.clone();
+        move || {
+            Path::new("/config/pcs_config.json").is_file()
+                && fs::read_to_string(LOGIN_HASH).is_ok_and(|saved| saved.trim_end() == fingerprint)
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    if cached {
+        return Ok(true);
+    }
+    let output = Command::new(CLI)
+        .arg("login")
+        .arg(format!("-bduss={}", settings.bduss))
+        .arg(format!("-stoken={}", settings.stoken))
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout).contains("百度帐号登录成功:")
+    {
+        return Ok(false);
+    }
+    tokio::task::spawn_blocking(move || {
+        save_private(Path::new(LOGIN_HASH), fingerprint.as_bytes())
+    })
+    .await
+    .map_err(io::Error::other)??;
+    Ok(true)
+}
+
 async fn download(settings: &Settings, status: &RwLock<Snapshot>) -> io::Result<bool> {
+    let destination = settings.clone();
+    tokio::task::spawn_blocking(move || destination.prepare_destination())
+        .await
+        .map_err(io::Error::other)??;
+    if !login(settings).await? {
+        status.write().await.phase = "login_failed";
+        return Ok(false);
+    }
     let mut child = Command::new("/bin/busybox")
         .args([
             "sh",
             "-c",
-            "exec /bin/busybox sh /entrypoint.sh auto-download 2>&1",
+            "exec /usr/local/bin/BaiduPCS-Go \"$@\" 2>&1",
+            CLI,
+            "download",
+            "--saveto",
+            &settings.download_directory,
+            &settings.monitor_directory,
         ])
-        .env("BAIDU_BDUSS", &settings.bduss)
-        .env("BAIDU_STOKEN", &settings.stoken)
-        .env("MONITOR_DIRECTORY", &settings.monitor_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .kill_on_drop(true)

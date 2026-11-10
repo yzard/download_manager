@@ -103,12 +103,13 @@ function openSettings() {
   form.reset();
   error.textContent = "";
   form.elements.monitor_directory.value = current?.monitor_directory || "";
+  form.elements.download_directory.value = current?.download_directory || "/downloads";
   const saved = current?.has_tokens === true;
   form.elements.bduss.required = !saved;
   form.elements.stoken.required = !saved;
   document.querySelector("#settings-description").textContent = saved
     ? "留空会保留已保存的 Token。"
-    : "填入百度网盘的 BDUSS 和 STOKEN，然后选择监控目录。";
+    : "填入百度网盘的 BDUSS 和 STOKEN，然后设置监控目录和保存位置。";
   dialog.showModal();
 }
 

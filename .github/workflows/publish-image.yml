@@ -8,6 +8,7 @@ on:
       - entrypoint.sh
       - Cargo.toml
       - Cargo.lock
+      - schema.sql
       - 'src/**'
       - 'web/**'
       - LICENSE.BaiduPCS-Go
@@ -19,6 +20,10 @@ on:
 permissions:
   contents: read
   packages: write
+
+concurrency:
+  group: publish-download-manager
+  cancel-in-progress: true
 
 jobs:
   publish:

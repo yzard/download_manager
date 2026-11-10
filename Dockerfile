@@ -19,7 +19,7 @@ RUN set -eu; \
     unzip -p "/tmp/${archive}" "BaiduPCS-Go-v${BAIDUPCS_VERSION}-linux-${TARGETARCH}/BaiduPCS-Go" \
       > /usr/local/bin/BaiduPCS-Go; \
     chmod 755 /usr/local/bin/BaiduPCS-Go; \
-    mkdir -p /rootfs/config /rootfs/downloads
+    mkdir -p /rootfs/config /rootfs/downloads /rootfs/data
 
 FROM busybox:1.37.0-musl AS runtime-tools
 
@@ -30,9 +30,10 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
 COPY web/ ./web/
+COPY schema.sql ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=download-manager-${TARGETARCH},target=/build/target \
-    cargo build --locked --release && cp target/release/download-manager /download-manager
+    --mount=type=cache,id=download_manager-${TARGETARCH},target=/build/target \
+    cargo build --locked --release && cp target/release/download_manager /download_manager
 
 FROM scratch
 
@@ -40,7 +41,7 @@ COPY --from=download /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certif
 COPY --from=download /usr/share/zoneinfo/ /usr/share/zoneinfo/
 COPY --from=runtime-tools /bin/busybox /bin/busybox
 COPY --from=download /usr/local/bin/BaiduPCS-Go /usr/local/bin/BaiduPCS-Go
-COPY --from=web-build /download-manager /usr/local/bin/download-manager
+COPY --from=web-build /download_manager /usr/local/bin/download_manager
 COPY --from=download --chown=1000:1000 /rootfs/ /
 COPY entrypoint.sh /entrypoint.sh
 COPY LICENSE.BaiduPCS-Go /licenses/BaiduPCS-Go.txt
