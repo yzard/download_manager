@@ -43,6 +43,9 @@ function applyLanguage(next) {
     element.setAttribute("aria-label", label);
     element.title = label;
   }
+  for (const handle of document.querySelectorAll(".column-resize")) {
+    labelResizeHandle(handle);
+  }
   for (const element of document.querySelectorAll("[data-message]")) {
     showMessage(element, element.dataset.message);
   }
@@ -218,6 +221,7 @@ function formatBytes(value) {
 
 function renderFile(file, provider) {
   const row = document.createElement("tr");
+  row.insertCell().textContent = provider === "baidu" ? text("baidu") : provider;
   const name = row.insertCell();
   name.textContent = file.path.split("/").pop() || file.path;
   name.title = file.path;
@@ -244,12 +248,88 @@ function renderFile(file, provider) {
     progress.textContent = "—";
   }
 
-  row.insertCell().textContent = active ? formatBytes(file.speed) + "/s" : "—";
+  const speed = row.insertCell();
+  speed.textContent = active ? formatBytes(file.speed) + "/s" : "—";
+  speed.title = speed.textContent;
   const badge = row.insertCell();
   badge.textContent = text("state_" + file.status) || file.status;
-  row.insertCell().textContent = provider === "baidu" ? text("baidu") : provider;
   if (active) row.className = "active";
   return row;
+}
+
+function labelResizeHandle(handle) {
+  const column = text(handle.parentElement.dataset.column);
+  handle.setAttribute("aria-label", text("resizeColumn").replace("{column}", column));
+}
+
+function enableColumnResizing() {
+  const table = rows.closest("table");
+  const defaults = getComputedStyle(table);
+  const storageKey = "download-manager-column-widths";
+  const minimums = {source: 80, file: 120, progress: 150, speed: 90, status: 90};
+  const maximum = 1600;
+  let storedWidths;
+  try {
+    storedWidths = JSON.parse(localStorage.getItem(storageKey));
+  } catch {
+    // Resizing still works when browser storage is unavailable.
+  }
+
+  const widths = {};
+  function persistWidths() {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(widths));
+    } catch {
+      // Keep the current widths for this page when persistence is unavailable.
+    }
+  }
+
+  for (const header of table.querySelectorAll("th[data-column]")) {
+    const column = header.dataset.column;
+    const minimum = minimums[column];
+    const property = "--" + column + "-width";
+    const handle = document.createElement("span");
+    handle.className = "column-resize";
+    handle.tabIndex = 0;
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.setAttribute("aria-valuemin", minimum);
+    handle.setAttribute("aria-valuemax", maximum);
+    header.append(handle);
+    labelResizeHandle(handle);
+
+    function setWidth(requested) {
+      const width = Math.max(minimum, Math.min(maximum, Math.round(requested)));
+      widths[column] = width;
+      table.style.setProperty(property, width + "px");
+      handle.setAttribute("aria-valuenow", width);
+    }
+
+    const savedWidth = storedWidths?.[column];
+    setWidth(Number.isFinite(savedWidth) ? savedWidth : Number.parseInt(defaults.getPropertyValue(property), 10));
+
+    let drag;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || drag) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      drag = {pointer: event.pointerId, x: event.clientX, width: widths[column]};
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (drag?.pointer === event.pointerId) setWidth(drag.width + event.clientX - drag.x);
+    });
+    handle.addEventListener("lostpointercapture", (event) => {
+      if (drag?.pointer !== event.pointerId) return;
+      drag = undefined;
+      persistWidths();
+    });
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      setWidth(widths[column] + (event.key === "ArrowRight" ? 10 : -10));
+      persistWidths();
+    });
+  }
 }
 
 function renderDownloads() {
@@ -293,4 +373,5 @@ async function refresh() {
   }
 }
 
+enableColumnResizing();
 refresh();

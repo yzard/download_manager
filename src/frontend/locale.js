@@ -25,6 +25,7 @@ const messages = {
   speed: ["速度", "Speed"],
   status: ["状态", "Status"],
   source: ["来源", "Source"],
+  resizeColumn: ["调整「{column}」列宽", "Resize the {column} column"],
   connectingDownloads: ["正在连接下载服务", "Connecting to the download service"],
   general: ["常规", "General"],
   language: ["界面语言", "Interface language"],

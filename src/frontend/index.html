@@ -53,7 +53,22 @@
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th scope="col" data-text="file">文件</th><th scope="col" data-text="progress">进度</th><th scope="col" data-text="speed">速度</th><th scope="col" data-text="status">状态</th><th scope="col" data-text="source">来源</th></tr></thead>
+          <colgroup>
+            <col data-column="source">
+            <col data-column="file">
+            <col data-column="progress">
+            <col data-column="speed">
+            <col data-column="status">
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col" data-column="source"><span data-text="source">来源</span></th>
+              <th scope="col" data-column="file"><span data-text="file">文件</span></th>
+              <th scope="col" data-column="progress"><span data-text="progress">进度</span></th>
+              <th scope="col" data-column="speed"><span data-text="speed">速度</span></th>
+              <th scope="col" data-column="status"><span data-text="status">状态</span></th>
+            </tr>
+          </thead>
           <tbody id="downloads"></tbody>
         </table>
       </div>

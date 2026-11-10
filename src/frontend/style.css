@@ -22,15 +22,44 @@ h2 { font-size: 19px; }
 .muted, .empty { color: var(--muted); }
 .status { color: var(--accent); text-align: right; font-size: 13px; }
 .table-scroll { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
-th { font-weight: 600; color: var(--muted); background: #f8fafb; font-size: 13px; }
+table {
+  --source-width: 115px;
+  --file-width: 340px;
+  --progress-width: 225px;
+  --speed-width: 135px;
+  --status-width: 185px;
+  width: calc(var(--source-width) + var(--file-width) + var(--progress-width) + var(--speed-width) + var(--status-width));
+  table-layout: fixed;
+  border-collapse: collapse;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+col[data-column="source"] { width: var(--source-width); }
+col[data-column="file"] { width: var(--file-width); }
+col[data-column="progress"] { width: var(--progress-width); }
+col[data-column="speed"] { width: var(--speed-width); }
+col[data-column="status"] { width: var(--status-width); }
+th { position: relative; font-weight: 600; color: var(--muted); background: #f8fafb; font-size: 13px; }
 td, th { padding: 12px 16px; border-top: 1px solid var(--border); }
 td:first-child, th:first-child { padding-left: 22px; }
-td:nth-child(2) { min-width: 170px; }
-td:nth-child(n+3) { white-space: nowrap; }
-.filename { min-width: 165px; overflow-wrap: anywhere; }
+th > span:first-child, td:not(.filename), td small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+th > span:first-child { display: block; }
+.filename { overflow-wrap: anywhere; }
+.column-resize {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 10px;
+  border-right: 1px solid var(--border);
+  cursor: col-resize;
+  touch-action: none;
+}
+.column-resize:hover, .column-resize:focus-visible { border-right: 2px solid var(--accent); }
 .active { background: #f0f8fc; }
-progress { width: 100px; height: 8px; accent-color: var(--accent); vertical-align: middle; margin-right: 7px; }
+progress { width: clamp(45px, calc(100% - 58px), 100px); height: 8px; accent-color: var(--accent); vertical-align: middle; margin-right: 7px; }
 small { display: block; color: var(--muted); margin-top: 2px; }
 .empty { text-align: center; padding: 36px 18px; }
 button, input, select { font: inherit; color: inherit; border: 1px solid var(--border); border-radius: 8px; }

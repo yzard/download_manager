@@ -108,7 +108,7 @@ docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps download_manage
 
 监控 `/NAS下载` 并保存到 `/downloads` 时，文件落在 NAS 的 `/data/downloads/baidu/NAS下载` 中。保存到 `/downloads/archive` 时，文件落在 `/data/downloads/baidu/archive/NAS下载` 中。
 
-已经下载的同名文件会跳过，中断后会尝试续传未完成的文件。同名文件内容变更时需要手动处理旧文件。下载速度受百度非会员限制。进度页面每秒更新，逐行标注百度来源、进度条和速度。
+已经下载的同名文件会跳过，中断后会尝试续传未完成的文件。同名文件内容变更时需要手动处理旧文件。下载速度受百度非会员限制。进度页面每秒更新，逐行标注百度来源、进度条和速度。拖动表头右侧的分隔线可调整列宽。浏览器会保留调整后的宽度。
 
 ```sh
 docker compose -f /data/docker/4_torrent.yaml logs -f download_manager
