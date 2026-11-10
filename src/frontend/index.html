@@ -34,6 +34,13 @@
         <p class="error" role="alert"></p>
         <div class="actions"><button type="submit" class="primary">登录</button></div>
       </form>
+      <form id="account-setup-form" hidden>
+        <label>用户名 <input name="username" autocomplete="username" maxlength="64" pattern="[A-Za-z0-9._\-]+" required></label>
+        <label>密码 <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label>确认密码 <input name="confirm_password" type="password" autocomplete="new-password" required></label>
+        <p class="error" role="alert"></p>
+        <div class="actions"><button type="submit" class="primary">保存账号</button></div>
+      </form>
     </section>
 
     <section id="downloads-panel" aria-labelledby="downloads-title" class="panel" hidden>
@@ -64,6 +71,7 @@
       <label>STOKEN <input name="stoken" type="password" spellcheck="false" maxlength="4096"></label>
       <label>网盘监控目录 <input name="monitor_directory" required spellcheck="false" placeholder="/NAS下载" maxlength="4096"></label>
       <label>下载保存位置 <input name="download_directory" required spellcheck="false" placeholder="/downloads" maxlength="4096"></label>
+      <label>检查间隔（秒） <input name="check_interval_seconds" type="number" min="1" max="4294967295" step="1" required></label>
       </fieldset>
       <section class="account-settings" aria-label="账号">
         <h3>账号</h3>

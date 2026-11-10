@@ -14,13 +14,12 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use settings::BaiduSettings;
+use settings::{BaiduSettings, DEFAULT_CHECK_INTERVAL_SECONDS};
 use std::{
     env,
     io::{self, Read},
     path::Path,
     sync::Arc,
-    time::Duration,
 };
 use tokio::{
     net::TcpListener,
@@ -34,7 +33,7 @@ const DATABASE: &str = "/data/download_manager.sqlite3";
 #[derive(Clone)]
 struct AppState {
     baidu_settings: watch::Sender<BaiduSettings>,
-    account: Arc<RwLock<Option<auth::Account>>>,
+    account_access: Arc<RwLock<auth::AccountAccess>>,
     save_lock: Arc<Mutex<()>>,
     status: Arc<RwLock<Snapshot>>,
     sessions: Arc<Mutex<auth::Sessions>>,
@@ -47,6 +46,7 @@ struct Status {
     setup_required: bool,
     monitor_directory: String,
     download_directory: String,
+    check_interval_seconds: u32,
     phase: &'static str,
     files: Vec<Download>,
 }
@@ -60,6 +60,7 @@ async fn status(State(state): State<AppState>, _session: Session, _body: Bytes) 
         setup_required: !settings.ready(),
         monitor_directory: settings.monitor_directory.clone(),
         download_directory: settings.download_directory.clone(),
+        check_interval_seconds: settings.check_interval_seconds,
         phase: if settings.ready() {
             snapshot.phase
         } else {
@@ -78,6 +79,7 @@ struct BaiduSettingsInput {
     stoken: String,
     monitor_directory: String,
     download_directory: String,
+    check_interval_seconds: Option<u32>,
 }
 
 struct AppError(StatusCode, &'static str);
@@ -118,7 +120,7 @@ impl FromRequestParts<AppState> for Session {
 
 #[derive(Serialize)]
 struct SessionInfo {
-    account_configured: bool,
+    account_setup: Option<auth::AccountSetup>,
     username: Option<String>,
 }
 
@@ -127,14 +129,17 @@ async fn session_info(
     headers: HeaderMap,
     _body: Bytes,
 ) -> Json<SessionInfo> {
-    let account = state.account.read().await.clone();
+    let (account, account_setup) = {
+        let access = state.account_access.read().await;
+        (access.account.clone(), access.setup_mode())
+    };
     let authenticated = if let Some(token) = auth::session_token(&headers) {
         state.sessions.lock().await.contains(token)
     } else {
         false
     };
     Json(SessionInfo {
-        account_configured: account.is_some(),
+        account_setup,
         username: account
             .filter(|_| authenticated)
             .map(|account| account.username),
@@ -143,23 +148,29 @@ async fn session_info(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LoginInput {
+struct Credentials {
     username: String,
     password: String,
 }
 
 async fn login(
     State(state): State<AppState>,
-    Json(input): Json<LoginInput>,
+    Json(input): Json<Credentials>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.sessions.lock().await.allow_login_attempt() {
         return Err(AppError(StatusCode::TOO_MANY_REQUESTS, "请稍等一秒再试。"));
     }
     let _guard = state.save_lock.lock().await;
-    let account = state.account.read().await.clone().ok_or(AppError(
-        StatusCode::CONFLICT,
-        "请先在服务器上初始化允许登录的账号。",
-    ))?;
+    let account = {
+        let access = state.account_access.read().await;
+        if access.setup_mode().is_some() {
+            return Err(AppError(StatusCode::CONFLICT, "请先在网页设置登录账号。"));
+        }
+        access
+            .account
+            .clone()
+            .ok_or(AppError(StatusCode::CONFLICT, "请先在网页设置登录账号。"))?
+    };
     let verified = tokio::task::spawn_blocking(move || {
         let password_matches = auth::verify_password(&input.password, &account.password_hash);
         password_matches && input.username == account.username
@@ -179,6 +190,63 @@ async fn login(
         .create()
         .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "无法建立登录会话。"))?;
     Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]))
+}
+
+async fn setup_account(
+    State(state): State<AppState>,
+    Json(input): Json<Credentials>,
+) -> Result<StatusCode, AppError> {
+    let guard = state.save_lock.clone().lock_owned().await;
+    let closed = || AppError(StatusCode::CONFLICT, "账号设置入口已关闭，请登录。");
+    let reset_pending = {
+        let access = state.account_access.read().await;
+        if access.setup_mode().is_none() {
+            return Err(closed());
+        }
+        access.reset_pending
+    };
+    if !auth::valid_username(&input.username) {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "用户名须为 1 至 64 位字母、数字、点、下划线或连字符。",
+        ));
+    }
+    if !auth::valid_password(&input.password) {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "密码至少需要 12 个字符，且最多 1024 字节。",
+        ));
+    }
+
+    // Publish the saved account even if the browser disconnects.
+    tokio::spawn(async move {
+        let _guard = guard;
+        let account = tokio::task::spawn_blocking(move || {
+            let account = auth::Account {
+                username: input.username,
+                password_hash: auth::hash_password(&input.password).map_err(save_error)?,
+            };
+            if !storage::save_account_setup(Path::new(DATABASE), &account, reset_pending)
+                .map_err(save_error)?
+            {
+                return Err(closed());
+            }
+            Ok(account)
+        })
+        .await
+        .map_err(save_error)??;
+        let mut sessions = state.sessions.lock().await;
+        *state.account_access.write().await = auth::AccountAccess {
+            account: Some(account),
+            reset_pending: false,
+        };
+        sessions.clear();
+        Ok::<_, AppError>(())
+    })
+    .await
+    .map_err(save_error)??;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn logout(
@@ -217,9 +285,10 @@ async fn change_password(
     tokio::spawn(async move {
         let _guard = guard;
         let account = state
-            .account
+            .account_access
             .read()
             .await
+            .account
             .clone()
             .ok_or(AppError(StatusCode::UNAUTHORIZED, "请先登录。"))?;
         let saved_account = tokio::task::spawn_blocking(move || {
@@ -237,7 +306,7 @@ async fn change_password(
         .await
         .map_err(save_error)??;
         let mut sessions = state.sessions.lock().await;
-        *state.account.write().await = Some(saved_account);
+        state.account_access.write().await.account = Some(saved_account);
         sessions.clear();
         Ok::<_, AppError>(())
     })
@@ -273,6 +342,9 @@ async fn save_settings(
     }
     settings.monitor_directory = input.monitor_directory.trim().to_owned();
     settings.download_directory = input.download_directory.trim().to_owned();
+    if let Some(interval) = input.check_interval_seconds {
+        settings.check_interval_seconds = interval;
+    }
     settings
         .validate()
         .map_err(|error| AppError(StatusCode::BAD_REQUEST, error))?;
@@ -320,6 +392,7 @@ fn app(state: AppState, web_access: web_access::AllowedHosts) -> Router {
         .route("/api/v1/baidu/status", post(status))
         .route("/api/v1/auth/session", post(session_info))
         .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/setup-account", post(setup_account))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/change-password", post(change_password))
         .route("/api/v1/baidu/save-settings", post(save_settings))
@@ -336,22 +409,21 @@ async fn main() -> io::Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
         [] => {}
-        [command, username] if command == "init-user" => return init_user(username),
         [command] if command == "import-baidu" => return import_baidu(),
+        _ => return Err(io::Error::other("Usage: download_manager [import-baidu]")),
+    }
+    let reset_requested = match env::var("RESET_USER_PASSWORD") {
+        Ok(value) if value == "true" => true,
+        Ok(value) if value == "false" => false,
+        Err(env::VarError::NotPresent) => false,
         _ => {
             return Err(io::Error::other(
-                "Usage: download_manager [init-user USERNAME]",
+                "RESET_USER_PASSWORD must be true or false",
             ));
         }
-    }
+    };
     let initial = storage::load_baidu(Path::new(DATABASE))?;
-    let account = storage::load_account(Path::new(DATABASE))?;
-    let interval = env::var("CHECK_INTERVAL_SECONDS")
-        .unwrap_or_else(|_| "300".to_owned())
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or_else(|| io::Error::other("CHECK_INTERVAL_SECONDS must be a positive integer"))?;
+    let account_access = storage::load_account_access(Path::new(DATABASE), reset_requested)?;
     let allowed_hosts = match env::var("WEB_ALLOWED_HOSTS") {
         Ok(value) => web_access::AllowedHosts::parse(&value)?,
         Err(env::VarError::NotPresent) => web_access::AllowedHosts::default(),
@@ -364,16 +436,13 @@ async fn main() -> io::Result<()> {
     let status = Arc::new(RwLock::new(Snapshot::default()));
     let state = AppState {
         baidu_settings: settings,
-        account: Arc::new(RwLock::new(account)),
+        account_access: Arc::new(RwLock::new(account_access)),
         save_lock: Arc::default(),
         status: status.clone(),
         sessions: Arc::default(),
     };
     let mut terminate = signal(SignalKind::terminate())?;
-    let worker =
-        tokio::spawn(
-            async move { worker::run(updates, &status, Duration::from_secs(interval)).await },
-        );
+    let worker = tokio::spawn(async move { worker::run(updates, &status).await });
     eprintln!("Download Manager listening on {}", listener.local_addr()?);
     let result = axum::serve(listener, app(state, allowed_hosts))
         .with_graceful_shutdown(async move {
@@ -383,40 +452,6 @@ async fn main() -> io::Result<()> {
     worker.abort();
     let _ = worker.await;
     result
-}
-
-fn init_user(username: &str) -> io::Result<()> {
-    if !auth::valid_username(username) {
-        return Err(io::Error::other(
-            "Username must be 1–64 letters, digits, dots, underscores or hyphens",
-        ));
-    }
-    let path = Path::new(DATABASE);
-    if storage::load_account(path)?.is_some() {
-        return Err(io::Error::other(
-            "The allowed account is already configured",
-        ));
-    }
-    let password = rpassword::prompt_password("Password (at least 12 characters): ")?;
-    if !auth::valid_password(&password) {
-        return Err(io::Error::other(
-            "Password must be at least 12 characters and at most 1024 bytes",
-        ));
-    }
-    if password != rpassword::prompt_password("Confirm password: ")? {
-        return Err(io::Error::other("Passwords did not match"));
-    }
-    let account = auth::Account {
-        username: username.to_owned(),
-        password_hash: auth::hash_password(&password)?,
-    };
-    if !storage::create_account(path, &account)? {
-        return Err(io::Error::other(
-            "The allowed account is already configured",
-        ));
-    }
-    println!("Allowed account configured. Restart Download Manager to load it.");
-    Ok(())
 }
 
 fn import_baidu() -> io::Result<()> {
@@ -432,6 +467,9 @@ fn import_baidu() -> io::Result<()> {
         stoken: input.stoken,
         monitor_directory: input.monitor_directory,
         download_directory: input.download_directory,
+        check_interval_seconds: input
+            .check_interval_seconds
+            .unwrap_or(DEFAULT_CHECK_INTERVAL_SECONDS),
     };
     settings.validate().map_err(io::Error::other)?;
     if !storage::save_baidu(Path::new(DATABASE), &settings, false)? {

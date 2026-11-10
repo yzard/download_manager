@@ -30,6 +30,7 @@ ENV CARGO_TARGET_DIR=/build/target
 WORKDIR /build/src/backend
 COPY src/backend/Cargo.toml src/backend/Cargo.lock ./
 COPY src/backend/schema.sql ./
+COPY src/backend/migrations/ ./migrations/
 COPY src/backend/src/ ./src/
 COPY src/frontend/ ../frontend/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

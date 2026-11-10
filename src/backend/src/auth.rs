@@ -1,5 +1,6 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::http::{HeaderMap, HeaderValue, header};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     io,
@@ -13,6 +14,30 @@ const COOKIE: &str = "download_manager_session";
 pub struct Account {
     pub username: String,
     pub password_hash: String,
+}
+
+pub struct AccountAccess {
+    pub account: Option<Account>,
+    pub reset_pending: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSetup {
+    Create,
+    Reset,
+}
+
+impl AccountAccess {
+    pub fn setup_mode(&self) -> Option<AccountSetup> {
+        if self.account.is_none() {
+            Some(AccountSetup::Create)
+        } else if self.reset_pending {
+            Some(AccountSetup::Reset)
+        } else {
+            None
+        }
+    }
 }
 
 pub fn valid_username(username: &str) -> bool {

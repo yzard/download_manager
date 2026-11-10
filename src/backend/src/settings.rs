@@ -1,11 +1,14 @@
 use std::{fs, io, io::Write, path::Path};
 
+pub const DEFAULT_CHECK_INTERVAL_SECONDS: u32 = 300;
+
 #[derive(Clone)]
 pub struct BaiduSettings {
     pub bduss: String,
     pub stoken: String,
     pub monitor_directory: String,
     pub download_directory: String,
+    pub check_interval_seconds: u32,
 }
 
 impl Default for BaiduSettings {
@@ -15,6 +18,7 @@ impl Default for BaiduSettings {
             stoken: String::new(),
             monitor_directory: String::new(),
             download_directory: "/downloads".to_owned(),
+            check_interval_seconds: DEFAULT_CHECK_INTERVAL_SECONDS,
         }
     }
 }
@@ -56,6 +60,9 @@ impl BaiduSettings {
                 .any(|part| matches!(part, "." | ".."))
         {
             return Err("保存位置必须是 /downloads 或其下的子目录。");
+        }
+        if self.check_interval_seconds == 0 {
+            return Err("检查间隔至少为 1 秒。");
         }
         Ok(())
     }

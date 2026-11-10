@@ -1,5 +1,8 @@
-use crate::{auth::Account, settings::BaiduSettings};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::{
+    auth::{Account, AccountAccess},
+    settings::BaiduSettings,
+};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
 const LOAD_BAIDU: &str = "
@@ -7,6 +10,7 @@ SELECT bduss
      , stoken
      , monitor_directory
      , download_directory
+     , check_interval_seconds
   FROM baidu_settings
  WHERE singleton = 1";
 
@@ -16,9 +20,19 @@ SELECT username
   FROM allowed_account
  WHERE singleton = 1";
 
-const CREATE_ACCOUNT: &str = "
+const SAVE_ACCOUNT_SETUP: &str = "
 INSERT INTO allowed_account (singleton, username, password_hash)
 VALUES (1, ?1, ?2)
+ON CONFLICT (singleton) DO UPDATE
+SET username = excluded.username
+  , password_hash = excluded.password_hash
+WHERE ?3";
+
+const RESET_CONSUMED: &str = "SELECT EXISTS (SELECT 1 FROM account_reset WHERE singleton = 1)";
+const REARM_RESET: &str = "DELETE FROM account_reset WHERE singleton = 1";
+const CONSUME_RESET: &str = "
+INSERT INTO account_reset (singleton)
+VALUES (1)
 ON CONFLICT (singleton) DO NOTHING";
 
 const CHANGE_PASSWORD: &str = "
@@ -34,14 +48,16 @@ INSERT INTO baidu_settings (
   , stoken
   , monitor_directory
   , download_directory
+  , check_interval_seconds
 )
-VALUES (1, ?1, ?2, ?3, ?4)
+VALUES (1, ?1, ?2, ?3, ?4, ?5)
 ON CONFLICT (singleton) DO UPDATE
 SET bduss = excluded.bduss
   , stoken = excluded.stoken
   , monitor_directory = excluded.monitor_directory
   , download_directory = excluded.download_directory
-WHERE ?5 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
+  , check_interval_seconds = excluded.check_interval_seconds
+WHERE ?6 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
 
 fn connect(path: &Path) -> io::Result<Connection> {
     OpenOptions::new()
@@ -54,28 +70,38 @@ fn connect(path: &Path) -> io::Result<Connection> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(io::Error::other)?;
-    let version: u32 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(io::Error::other)?;
-    match version {
-        0 => {
-            let transaction = connection.transaction().map_err(io::Error::other)?;
-            transaction
-                .execute_batch(include_str!("../schema.sql"))
-                .map_err(io::Error::other)?;
-            transaction
-                .pragma_update(None, "user_version", 1)
-                .map_err(io::Error::other)?;
-            transaction.commit().map_err(io::Error::other)?;
-        }
-        1 => {}
-        _ => {
-            return Err(io::Error::other(
-                "Database schema is newer than this Download Manager version",
-            ));
-        }
+    if schema_version(&connection)? != 2 {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(io::Error::other)?;
+        let schema = match schema_version(&transaction)? {
+            0 => include_str!("../schema.sql"),
+            1 => include_str!("../migrations/002_account_reset_and_baidu_interval.sql"),
+            2 => {
+                transaction.commit().map_err(io::Error::other)?;
+                return Ok(connection);
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "Database schema is newer than this Download Manager version",
+                ));
+            }
+        };
+        transaction
+            .execute_batch(schema)
+            .map_err(io::Error::other)?;
+        transaction
+            .pragma_update(None, "user_version", 2)
+            .map_err(io::Error::other)?;
+        transaction.commit().map_err(io::Error::other)?;
     }
     Ok(connection)
+}
+
+fn schema_version(connection: &Connection) -> io::Result<u32> {
+    connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(io::Error::other)
 }
 
 pub fn load_baidu(path: &Path) -> io::Result<BaiduSettings> {
@@ -86,6 +112,7 @@ pub fn load_baidu(path: &Path) -> io::Result<BaiduSettings> {
                 stoken: row.get(1)?,
                 monitor_directory: row.get(2)?,
                 download_directory: row.get(3)?,
+                check_interval_seconds: row.get(4)?,
             })
         })
         .optional()
@@ -93,8 +120,15 @@ pub fn load_baidu(path: &Path) -> io::Result<BaiduSettings> {
         .unwrap_or_default())
 }
 
-pub fn load_account(path: &Path) -> io::Result<Option<Account>> {
-    connect(path)?
+pub fn load_account_access(path: &Path, reset_requested: bool) -> io::Result<AccountAccess> {
+    let mut connection = connect(path)?;
+    let transaction = connection.transaction().map_err(io::Error::other)?;
+    if !reset_requested {
+        transaction
+            .execute(REARM_RESET, [])
+            .map_err(io::Error::other)?;
+    }
+    let account = transaction
         .query_row(LOAD_ACCOUNT, [], |row| {
             Ok(Account {
                 username: row.get(0)?,
@@ -102,17 +136,37 @@ pub fn load_account(path: &Path) -> io::Result<Option<Account>> {
             })
         })
         .optional()
-        .map_err(io::Error::other)
+        .map_err(io::Error::other)?;
+    let reset_pending = reset_requested
+        && !transaction
+            .query_row(RESET_CONSUMED, [], |row| row.get::<_, bool>(0))
+            .map_err(io::Error::other)?;
+    transaction.commit().map_err(io::Error::other)?;
+    Ok(AccountAccess {
+        account,
+        reset_pending,
+    })
 }
 
-pub fn create_account(path: &Path, account: &Account) -> io::Result<bool> {
-    connect(path)?
+pub fn save_account_setup(path: &Path, account: &Account, reset_pending: bool) -> io::Result<bool> {
+    let mut connection = connect(path)?;
+    let transaction = connection.transaction().map_err(io::Error::other)?;
+    if reset_pending
+        && transaction
+            .execute(CONSUME_RESET, [])
+            .map_err(io::Error::other)?
+            == 0
+    {
+        return Ok(false);
+    }
+    let updated = transaction
         .execute(
-            CREATE_ACCOUNT,
-            params![account.username, account.password_hash],
+            SAVE_ACCOUNT_SETUP,
+            params![account.username, account.password_hash, reset_pending],
         )
-        .map(|count| count == 1)
-        .map_err(io::Error::other)
+        .map_err(io::Error::other)?;
+    transaction.commit().map_err(io::Error::other)?;
+    Ok(updated == 1)
 }
 
 pub fn change_password(path: &Path, current_hash: &str, new_hash: &str) -> io::Result<()> {
@@ -138,6 +192,7 @@ pub fn save_baidu(
                 settings.stoken,
                 settings.monitor_directory,
                 settings.download_directory,
+                settings.check_interval_seconds,
                 replace_existing,
             ],
         )

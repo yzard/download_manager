@@ -260,11 +260,7 @@ async fn download(settings: &BaiduSettings, status: &RwLock<Snapshot>) -> io::Re
     Ok(child.wait().await?.success())
 }
 
-pub async fn run(
-    mut settings: watch::Receiver<BaiduSettings>,
-    status: &RwLock<Snapshot>,
-    interval: Duration,
-) {
+pub async fn run(mut settings: watch::Receiver<BaiduSettings>, status: &RwLock<Snapshot>) {
     loop {
         let current = settings.borrow_and_update().clone();
         if current.ready() {
@@ -299,7 +295,7 @@ pub async fn run(
         }
         tokio::select! {
             changed = settings.changed() => if changed.is_err() { return },
-            () = tokio::time::sleep(interval) => {},
+            () = tokio::time::sleep(Duration::from_secs(u64::from(current.check_interval_seconds))) => {},
         }
     }
 }

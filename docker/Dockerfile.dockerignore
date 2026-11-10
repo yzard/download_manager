@@ -3,6 +3,7 @@
 !src/backend/Cargo.lock
 !src/backend/Cargo.toml
 !src/backend/schema.sql
+!src/backend/migrations/**
 !src/backend/src/**
 !src/frontend/**
 !LICENSE.BaiduPCS-Go

@@ -8,6 +8,8 @@ const empty = document.querySelector("#empty");
 const status = document.querySelector("#service-status");
 const loginPanel = document.querySelector("#login-panel");
 const loginForm = document.querySelector("#login-form");
+const loginTitle = document.querySelector("#login-title");
+const accountSetupForm = document.querySelector("#account-setup-form");
 const loginMessage = document.querySelector("#login-message");
 const passwordDialog = document.querySelector("#password-dialog");
 const passwordForm = document.querySelector("#password-form");
@@ -30,13 +32,16 @@ function showSession(next, message) {
   sessionGeneration++;
   const signedIn = Boolean(session.username);
   loginPanel.hidden = signedIn;
-  loginForm.hidden = !session.account_configured;
+  accountSetupForm.hidden = !session.account_setup;
+  if (!session.account_setup) accountSetupForm.reset();
+  loginForm.hidden = Boolean(session.account_setup);
+  loginTitle.textContent = {create: "创建登录账号", reset: "重设登录账号"}[session.account_setup] || "登录";
   document.querySelector("#downloads-panel").hidden = !signedIn;
   document.querySelector("#account-actions").hidden = !signedIn;
   document.querySelector("#signed-in-user").textContent = session.username || "";
-  loginMessage.textContent = message || (session.account_configured
-    ? "使用预先配置的账号登录。"
-    : "请在服务器上初始化允许登录的账号。");
+  loginMessage.textContent = message || (session.account_setup
+    ? "密码至少需要 12 个字符。"
+    : "使用已设置的账号登录。");
   if (!signedIn) {
     passwordDialog.close();
     dialog.close();
@@ -93,6 +98,14 @@ bindForm(loginForm, async (payload) => {
   await refreshSession();
 });
 
+bindForm(accountSetupForm, async ({ username, password, confirm_password }) => {
+  if (password !== confirm_password) throw new Error("两次输入的密码不一致。");
+  await submitJson("/api/v1/auth/setup-account", { username, password });
+  loginForm.elements.username.value = username;
+  await refreshSession("账号已保存，请登录。");
+  loginForm.elements.password.focus();
+});
+
 document.querySelector("#logout").addEventListener("click", async () => {
   try {
     await submitJson("/api/v1/auth/logout", {});
@@ -108,6 +121,7 @@ function openSettings() {
   error.textContent = "";
   form.elements.monitor_directory.value = current?.monitor_directory || "";
   form.elements.download_directory.value = current?.download_directory || "/downloads";
+  form.elements.check_interval_seconds.value = current?.check_interval_seconds ?? 300;
   const saved = current?.has_tokens === true;
   form.elements.bduss.required = !saved;
   form.elements.stoken.required = !saved;
@@ -121,7 +135,10 @@ document.querySelector("#open-settings").addEventListener("click", openSettings)
 document.querySelector("#close-settings").addEventListener("click", () => dialog.close());
 
 bindForm(form, async (payload) => {
-  await submitJson("/api/v1/baidu/save-settings", payload);
+  await submitJson("/api/v1/baidu/save-settings", {
+    ...payload,
+    check_interval_seconds: Number(payload.check_interval_seconds),
+  });
   dialog.close();
   status.textContent = "设置已保存";
 });
@@ -193,7 +210,7 @@ function renderFile(file, provider) {
 async function refresh() {
   try {
     if (document.hidden || dialog.open || passwordDialog.open) return;
-    if (!session || !session.account_configured) {
+    if (!session || session.account_setup) {
       await refreshSession();
     }
     if (!session?.username) return;

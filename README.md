@@ -18,14 +18,7 @@ Rust 后端在 `src/backend/`，网页在 `src/frontend/`。测试在 `tests/bac
 cargo test --manifest-path src/backend/Cargo.toml --target-dir build/backend --locked
 ```
 
-用 Docker Compose 和 Python 3 运行 `./run_playground.sh`，构建镜像并启动本地服务。运行数据保存在 `playground/`。在另一终端初始化本地账号。
-
-```sh
-docker compose -f docker/docker-compose.yaml run --rm --no-deps -it download_manager init-user operator
-docker compose -f docker/docker-compose.yaml restart download_manager
-```
-
-打开 `http://127.0.0.1:8085`。如需通过局域网访问，在 `playground/.env` 的 `WEB_ALLOWED_HOSTS` 中填入本机地址和端口。
+用 Docker Compose 和 Python 3 运行 `./run_playground.sh`，构建镜像并启动本地服务。运行数据保存在 `playground/`。打开 `http://127.0.0.1:8085` 创建登录账号。如需通过局域网访问，在 `playground/.env` 的 `WEB_ALLOWED_HOSTS` 中填入本机地址和端口。
 
 ## NAS Compose 配置
 
@@ -39,7 +32,7 @@ services:
     restart: always
     env_file: ./lsio.env
     environment:
-      CHECK_INTERVAL_SECONDS: "300"
+      # RESET_USER_PASSWORD: "true"
       WEB_ALLOWED_HOSTS: "192.168.1.10:8085"
     ports:
       - "0.0.0.0:8085:8080"
@@ -63,20 +56,25 @@ docker compose -f /data/docker/4_torrent.yaml pull download_manager
 
 从旧版服务迁移时，先停止 `baidupcs-go`，再改名和启动新服务。沿用旧的 BaiduPCS-Go 配置及下载文件，可以保留登录状态和续传数据。
 
-## 初始化允许登录的账号
+## 创建或重设登录账号
 
-在 NAS 终端运行下面的命令，将 `operator` 换成自己的用户名。终端提示输入两次密码，输入时不回显。密码至少需要 12 个字符。
+首次打开网页时，创建唯一的登录账号。密码至少需要 12 个字符。保存后，网页显示登录表单。用户名和 Argon2id 密码哈希保存在 `/data/download_manager.sqlite3`。
+
+忘记密码时，在 NAS 的服务配置中加入 `RESET_USER_PASSWORD: "true"`，然后在 NAS 运行下面的命令。
 
 ```sh
-docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps -it download_manager init-user operator
-docker compose -f /data/docker/4_torrent.yaml up -d --no-deps --force-recreate download_manager
+docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 ```
 
-初始化命令只允许建立一个账号。用户名和 Argon2id 密码哈希存放在 `/data/download_manager.sqlite3` 中。登录后可通过齿轮设置修改自己的密码。改密会结束已有会话，服务重启后也需要重新登录。
+打开网页，填写用户名和新密码。保存后重设入口关闭。同一次启用期间，重启容器也会保持关闭。
+
+重设完成后，删除该变量并再次应用 Compose 配置。以后需要重设时，再设为 `"true"` 并应用配置。
+
+登录后可通过齿轮设置修改自己的密码。改密会结束已有会话。
 
 ## 打开网页
 
-在局域网浏览器打开 `http://192.168.1.10:8085`。将示例地址替换为你的 NAS 地址，并把相同的主机和端口填入 `WEB_ALLOWED_HOSTS`。多个地址用逗号分隔。用初始化的账号登录。
+在局域网浏览器打开 `http://192.168.1.10:8085`。将示例地址替换为你的 NAS 地址，并把相同的主机和端口填入 `WEB_ALLOWED_HOSTS`。多个地址用逗号分隔。按网页提示创建账号或登录。
 
 网页使用 `/api/v1/auth/` 和 `/api/v1/baidu/` 下的 POST 接口。浏览器会话需要同源请求。
 
@@ -87,8 +85,9 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps --force-recreate d
 - `BDUSS` 和 `STOKEN` 是百度网盘的登录凭据。
 - 网盘监控目录是百度网盘上的绝对路径，例如 `/NAS下载`。
 - 下载保存位置是容器中的 `/downloads` 或其子目录，例如 `/downloads/archive`。
+- 检查间隔以秒为单位，默认 300 秒。
 
-保存后，设置写入 SQLite。后续通过右上角齿轮修改。已有 Token 时，输入框留空会保留原值。设置在当前下载轮次结束后应用。Token、监控目录和保存位置均由网页配置。
+保存后，设置写入 SQLite。后续通过右上角齿轮修改。已有 Token 时，输入框留空会保留原值。设置在当前下载轮次结束后应用。
 
 获取百度 Token 时，先在电脑浏览器登录 [百度网盘](https://pan.baidu.com/)。在 Chrome 或 Edge 中按 `F12`，打开“应用程序 → Cookie → https://pan.baidu.com”，复制 `BDUSS` 和 `STOKEN` 的完整值。`STOKEN` 的名称为大写。[BaiduPCS-Go 登录说明](https://github.com/qjfoidnh/BaiduPCS-Go#登录百度帐号)
 
@@ -102,7 +101,7 @@ docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps download_manage
 
 在百度网盘网页版创建设置中指定的目录，再把要下载到 NAS 的内容放进去。
 
-容器启动后立即检查一次。每轮下载结束后等待 `CHECK_INTERVAL_SECONDS` 秒再检查，默认 300 秒。修改检查间隔后，运行 `docker compose up -d` 应用环境变量。
+容器启动后立即检查一次。每轮下载结束后，按百度网盘设置中的间隔等待下一轮检查。修改间隔后，在网页保存即可。
 
 监控 `/NAS下载` 并保存到 `/downloads` 时，文件落在 NAS 的 `/data/downloads/baidu/NAS下载` 中。保存到 `/downloads/archive` 时，文件落在 `/data/downloads/baidu/archive/NAS下载` 中。
 
