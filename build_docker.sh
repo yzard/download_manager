@@ -3,7 +3,7 @@ set -eu
 
 cd "$(dirname "$0")"
 image=ghcr.io/yzard/download_manager:4.0.2
-source_label=org.opencontainers.image.source=https://github.com/yzard/BaiduPCS-go-srv
+source_label=org.opencontainers.image.source=https://github.com/yzard/download_manager
 
 case "$#:${1:-}" in
     0:) exec docker buildx build --load --label "$source_label" --tag "$image" . ;;
