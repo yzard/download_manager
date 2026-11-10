@@ -221,7 +221,9 @@ function formatBytes(value) {
 
 function renderFile(file, provider) {
   const row = document.createElement("tr");
-  row.insertCell().textContent = provider === "baidu" ? text("baidu") : provider;
+  const source = row.insertCell();
+  source.textContent = provider === "baidu" ? text("baidu") : provider;
+  source.title = source.textContent;
   const name = row.insertCell();
   name.textContent = file.path.split("/").pop() || file.path;
   name.title = file.path;

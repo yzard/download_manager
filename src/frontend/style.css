@@ -23,8 +23,8 @@ h2 { font-size: 19px; }
 .status { color: var(--accent); text-align: right; font-size: 13px; }
 .table-scroll { overflow-x: auto; }
 table {
-  --source-width: 115px;
-  --file-width: 340px;
+  --source-width: 140px;
+  --file-width: 315px;
   --progress-width: 225px;
   --speed-width: 135px;
   --status-width: 185px;
