@@ -34,3 +34,27 @@ fn validates_hosts_and_matching_origin() {
     assert!(AllowedHosts::parse("http://nas.local:8085").is_err());
     assert!(AllowedHosts::parse("nas.local").is_err());
 }
+
+#[test]
+fn accepts_root_or_a_literal_nested_base_path() {
+    let hosts = AllowedHosts::default();
+    assert_eq!(hosts.clone().with_base_url("/").unwrap().base_url(), "");
+    assert_eq!(
+        hosts
+            .clone()
+            .with_base_url("/tools/download-manager/")
+            .unwrap()
+            .base_url(),
+        "/tools/download-manager"
+    );
+    for invalid in [
+        "",
+        "//",
+        "/../download",
+        "/a//b",
+        "/a?b",
+        "https://nas/download",
+    ] {
+        assert!(hosts.clone().with_base_url(invalid).is_err());
+    }
+}

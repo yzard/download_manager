@@ -29,10 +29,16 @@ address = port["host_ip"]
 published = port["published"]
 target = port["target"]
 print(f"Port {address}:{published} -> {target}")
-print("Open http://127.0.0.1:" + port["published"])
-for authority in service["environment"].get("WEB_ALLOWED_HOSTS", "").split(","):
-    if authority.strip():
-        print("Open http://" + authority.strip())
+environment = service["environment"]
+base_url = environment.get("BASE_URL", "/").rstrip("/") + "/"
+https_host = environment.get("WEB_HTTPS_HOST")
+if https_host:
+    print("Open https://" + https_host + base_url)
+else:
+    print("Open http://127.0.0.1:" + published + base_url)
+    for authority in environment.get("WEB_ALLOWED_HOSTS", "").split(","):
+        if authority.strip():
+            print("Open http://" + authority.strip() + base_url)
 '
 
 exec docker compose -f "$compose_file" up --no-build --pull never

@@ -3,6 +3,7 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     io,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -100,39 +101,50 @@ pub enum CookieKind {
 }
 
 impl CookieKind {
-    fn name(self, secure: bool) -> &'static str {
-        match (self, secure) {
-            (Self::Access, true) => "__Host-download_manager_access",
-            (Self::Refresh, true) => "__Secure-download_manager_refresh",
-            (Self::Access, false) => "download_manager_access",
-            (Self::Refresh, false) => "download_manager_refresh",
+    fn name(self, secure: bool, base_url: &str) -> Cow<'static, str> {
+        let name = match (self, secure, base_url.is_empty()) {
+            (Self::Access, true, true) => "__Host-download_manager_access",
+            (Self::Access, true, false) => "__Secure-download_manager_access",
+            (Self::Refresh, true, _) => "__Secure-download_manager_refresh",
+            (Self::Access, false, _) => "download_manager_access",
+            (Self::Refresh, false, _) => "download_manager_refresh",
+        };
+        if base_url.is_empty() {
+            Cow::Borrowed(name)
+        } else {
+            let suffix: String = Sha256::digest(base_url.as_bytes())[..6]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            Cow::Owned(format!("{name}_{suffix}"))
         }
     }
 
-    pub fn read(self, headers: &HeaderMap, secure: bool) -> Option<TokenHash> {
+    pub fn read(self, headers: &HeaderMap, secure: bool, base_url: &str) -> Option<TokenHash> {
+        let cookie_name = self.name(secure, base_url);
         headers
             .get_all(header::COOKIE)
             .iter()
             .filter_map(|value| value.to_str().ok())
             .flat_map(|value| value.split(';'))
             .filter_map(|cookie| cookie.trim().split_once('='))
-            .find_map(|(name, value)| {
-                (name == self.name(secure))
-                    .then(|| token_hash(value))
-                    .flatten()
-            })
+            .find_map(|(name, value)| (name == cookie_name).then(|| token_hash(value)).flatten())
     }
 
-    pub fn header(self, value: &str, age: i64, secure: bool) -> HeaderValue {
-        let name = self.name(secure);
+    pub fn header(self, value: &str, age: i64, secure: bool, base_url: &str) -> HeaderValue {
+        let name = self.name(secure, base_url);
         let path = match self {
             Self::Access => "/",
             Self::Refresh => "/api/v1/auth",
         };
         let security = if secure { "; Secure" } else { "" };
         HeaderValue::from_str(&format!(
-            "{name}={value}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={age}{security}"
+            "{name}={value}; Path={base_url}{path}; HttpOnly; SameSite=Strict; Max-Age={age}{security}"
         ))
         .expect("cookie values use generated hex tokens and numeric ages")
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/backend/src/auth.rs"]
+mod tests;

@@ -2,7 +2,7 @@ use axum::{
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header, uri::Authority},
     middleware::Next,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
 };
 use std::{
     io,
@@ -15,6 +15,7 @@ use std::{
 pub struct AllowedHosts {
     http: Arc<[Authority]>,
     https: Option<TrustedHttps>,
+    base_url: Arc<str>,
 }
 
 #[derive(Clone)]
@@ -23,8 +24,11 @@ struct TrustedHttps {
     proxy: IpAddr,
 }
 
-#[derive(Clone, Copy)]
-pub struct RequestSecurity(pub bool);
+#[derive(Clone)]
+pub struct RequestSecurity {
+    pub secure: bool,
+    pub base_url: Arc<str>,
+}
 
 impl AllowedHosts {
     pub fn parse(input: &str) -> io::Result<Self> {
@@ -45,7 +49,35 @@ impl AllowedHosts {
                     .ok_or_else(|| io::Error::other("WEB_ALLOWED_HOSTS requires host:port entries"))
             })
             .collect::<io::Result<Arc<[_]>>>()
-            .map(|http| Self { http, https: None })
+            .map(|http| Self {
+                http,
+                ..Self::default()
+            })
+    }
+
+    pub fn with_base_url(mut self, value: &str) -> io::Result<Self> {
+        let base = value.strip_suffix('/').unwrap_or(value);
+        if value != "/"
+            && (base.len() > 256
+                || !base.strip_prefix('/').is_some_and(|path| {
+                    path.split('/').all(|segment| {
+                        !matches!(segment, "" | "." | "..")
+                            && segment
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte))
+                    })
+                }))
+        {
+            return Err(io::Error::other(
+                "BASE_URL must be / or a path such as /download-manager",
+            ));
+        }
+        self.base_url = Arc::from(base);
+        Ok(self)
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     pub fn with_https(mut self, host: &str, proxy: IpAddr) -> io::Result<Self> {
@@ -109,24 +141,14 @@ pub async fn handle(
         let allowed_http = allowed_hosts.is_http_host(&host);
         if secure || (allowed_hosts.https.is_none() && allowed_http) {
             if same_origin(&method, request.headers(), &host, secure) {
-                request.extensions_mut().insert(RequestSecurity(secure));
+                request.extensions_mut().insert(RequestSecurity {
+                    secure,
+                    base_url: allowed_hosts.base_url.clone(),
+                });
                 next.run(request).await
             } else {
                 StatusCode::FORBIDDEN.into_response()
             }
-        } else if let Some(config) = allowed_hosts
-            .https
-            .filter(|_| allowed_http && method.is_safe())
-        {
-            let location = format!(
-                "https://{}{}",
-                config.host,
-                request
-                    .uri()
-                    .path_and_query()
-                    .map_or("/", |path| path.as_str())
-            );
-            Redirect::temporary(&location).into_response()
         } else {
             StatusCode::FORBIDDEN.into_response()
         }
@@ -146,16 +168,21 @@ pub async fn handle(
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let csp = if allowed_hosts.base_url.is_empty() {
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    } else {
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'"
+    };
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
+        HeaderValue::from_static(csp),
     );
     response.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
     if !matches!(
-        path.as_str(),
+        path.strip_prefix(allowed_hosts.base_url()).unwrap_or(&path),
         "/api/v1/baidu/status" | "/api/v1/auth/session"
     ) || !response.status().is_success()
     {

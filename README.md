@@ -33,6 +33,7 @@ services:
     env_file: ./lsio.env
     environment:
       # RESET_USER_PASSWORD: "true"
+      # BASE_URL: "/download-manager"
       WEB_ALLOWED_HOSTS: "192.168.1.10:8085"
     ports:
       - "0.0.0.0:8085:8080"
@@ -84,7 +85,20 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 
 网页使用 `/api/v1/auth/` 和 `/api/v1/baidu/` 下的 POST 接口。浏览器会话需要同源请求。
 
-如果已有 HTTPS 反向代理，同时设置 `WEB_HTTPS_HOST` 和 `WEB_TRUSTED_PROXY`。前者是浏览器访问的域名，后者是代理连接到容器时的源 IP。代理应保留 Host，并设置 `X-Forwarded-Proto: https`。启用后，HTTP 页面会跳转到 HTTPS，HTTP 登录请求会被拒绝。
+让 Caddy 终止 TLS 并负责 HTTP 跳转。Download Manager 在容器里使用 HTTP。同时设置 `WEB_HTTPS_HOST` 和 `WEB_TRUSTED_PROXY`。前者是浏览器访问的域名，后者是 Caddy 连接到容器时的源 IP。Caddy 保留 Host，并转发 `X-Forwarded-Proto: https`。应用只接受来自这个代理的 HTTPS 转发请求，并发送 Secure Cookie。
+
+## 挂载到网站子路径
+
+在服务环境变量中设置 `BASE_URL: "/download-manager"`，然后重新创建容器。默认路径是 `/`。
+
+在现有 Caddy 站点块中添加以下路由。Caddy 和 Download Manager 必须能通过 Docker 网络相互访问。
+
+```caddyfile
+@downloadManager path /download-manager /download-manager/*
+reverse_proxy @downloadManager download_manager:8080
+```
+
+打开同一站点下的 `/download-manager/`。同源页面也可以用 iframe 嵌入这个路径。API 和 Cookie 都使用同一个前缀。更改路径后，在新地址登录一次。
 
 ## 常规设置
 

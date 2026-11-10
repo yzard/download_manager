@@ -11,7 +11,7 @@ use axum::{
     extract::{DefaultBodyLimit, FromRequestParts, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     middleware,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -103,10 +103,10 @@ struct Session {
 }
 
 impl Session {
-    fn from_headers(headers: &HeaderMap, secure: bool) -> Option<Self> {
+    fn from_headers(headers: &HeaderMap, security: &RequestSecurity) -> Option<Self> {
         Some(Self {
-            hash: CookieKind::Access.read(headers, secure)?,
-            secure,
+            hash: CookieKind::Access.read(headers, security.secure, &security.base_url)?,
+            secure: security.secure,
         })
     }
 
@@ -133,12 +133,11 @@ impl FromRequestParts<AppState> for Session {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &AppState) -> Result<Self, AppError> {
-        let secure = parts
+        let security = parts
             .extensions
             .get::<RequestSecurity>()
-            .ok_or(AppError(StatusCode::FORBIDDEN, "requestFailed"))?
-            .0;
-        let session = Self::from_headers(&parts.headers, secure)
+            .ok_or(AppError(StatusCode::FORBIDDEN, "requestFailed"))?;
+        let session = Self::from_headers(&parts.headers, security)
             .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
         session.require_active().await?;
         Ok(session)
@@ -162,19 +161,21 @@ struct SessionInfo {
 
 async fn session_info(
     State(state): State<AppState>,
-    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    Extension(security): Extension<RequestSecurity>,
     headers: HeaderMap,
     _body: Bytes,
 ) -> Result<Json<SessionInfo>, AppError> {
-    let refresh_in = match Session::from_headers(&headers, secure) {
+    let refresh_in = match Session::from_headers(&headers, &security) {
         Some(session) => session.remaining().await?,
         None => None,
     };
     let access = state.account_access.read().await;
     let account_setup = access.setup_mode();
     let authenticated = account_setup.is_none() && refresh_in.is_some() && access.account.is_some();
-    let can_refresh =
-        account_setup.is_none() && CookieKind::Refresh.read(&headers, secure).is_some();
+    let can_refresh = account_setup.is_none()
+        && CookieKind::Refresh
+            .read(&headers, security.secure, &security.base_url)
+            .is_some();
     let general = state.settings.borrow().general.clone();
     Ok(Json(SessionInfo {
         language: general.language,
@@ -221,7 +222,7 @@ fn verify_attempt(
 
 async fn login(
     State(state): State<AppState>,
-    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    Extension(security): Extension<RequestSecurity>,
     Json(input): Json<Credentials>,
 ) -> Result<(StatusCode, HeaderMap), AppError> {
     let guard = state.save_lock.clone().lock_owned().await;
@@ -251,7 +252,7 @@ async fn login(
             path,
             &refresh_hash,
             &access_hash,
-            secure,
+            security.secure,
             auth::now().map_err(session_error)?,
             &account.password_hash,
         )
@@ -259,11 +260,16 @@ async fn login(
         let mut headers = HeaderMap::new();
         headers.append(
             header::SET_COOKIE,
-            CookieKind::Access.header(&access, ACCESS_SECONDS, secure),
+            CookieKind::Access.header(&access, ACCESS_SECONDS, security.secure, &security.base_url),
         );
         headers.append(
             header::SET_COOKIE,
-            CookieKind::Refresh.header(&refresh, SESSION_SECONDS, secure),
+            CookieKind::Refresh.header(
+                &refresh,
+                SESSION_SECONDS,
+                security.secure,
+                &security.base_url,
+            ),
         );
         Ok((StatusCode::NO_CONTENT, headers))
     })
@@ -278,21 +284,31 @@ fn generate_token() -> Result<(String, TokenHash), AppError> {
 }
 
 async fn renew_session(
-    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    Extension(security): Extension<RequestSecurity>,
     headers: HeaderMap,
     _body: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
     let refresh = CookieKind::Refresh
-        .read(&headers, secure)
+        .read(&headers, security.secure, &security.base_url)
         .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
     let cookie = tokio::task::spawn_blocking(move || {
         let (access, access_hash) = generate_token()?;
         let now = auth::now().map_err(session_error)?;
-        let expires =
-            accounts::renew_access(Path::new(DATABASE), &refresh, &access_hash, secure, now)
-                .map_err(session_error)?
-                .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
-        Ok::<_, AppError>(CookieKind::Access.header(&access, expires - now, secure))
+        let expires = accounts::renew_access(
+            Path::new(DATABASE),
+            &refresh,
+            &access_hash,
+            security.secure,
+            now,
+        )
+        .map_err(session_error)?
+        .ok_or(AppError(StatusCode::UNAUTHORIZED, "loginRequired"))?;
+        Ok::<_, AppError>(CookieKind::Access.header(
+            &access,
+            expires - now,
+            security.secure,
+            &security.base_url,
+        ))
     })
     .await
     .map_err(session_error)??;
@@ -371,13 +387,14 @@ async fn setup_account(
 }
 
 async fn logout(
-    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    Extension(security): Extension<RequestSecurity>,
     headers: HeaderMap,
     _body: Bytes,
 ) -> Result<(StatusCode, HeaderMap), AppError> {
-    let refresh = CookieKind::Refresh.read(&headers, secure);
-    let access = CookieKind::Access.read(&headers, secure);
+    let refresh = CookieKind::Refresh.read(&headers, security.secure, &security.base_url);
+    let access = CookieKind::Access.read(&headers, security.secure, &security.base_url);
     if refresh.is_some() || access.is_some() {
+        let secure = security.secure;
         tokio::task::spawn_blocking(move || {
             accounts::revoke_session(Path::new(DATABASE), refresh, access, secure)
         })
@@ -385,15 +402,18 @@ async fn logout(
         .map_err(session_error)?
         .map_err(session_error)?;
     }
-    Ok((StatusCode::NO_CONTENT, expired_session(secure)))
+    Ok((StatusCode::NO_CONTENT, expired_session(&security)))
 }
 
-fn expired_session(secure: bool) -> HeaderMap {
+fn expired_session(security: &RequestSecurity) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.append(header::SET_COOKIE, CookieKind::Access.header("", 0, secure));
     headers.append(
         header::SET_COOKIE,
-        CookieKind::Refresh.header("", 0, secure),
+        CookieKind::Access.header("", 0, security.secure, &security.base_url),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        CookieKind::Refresh.header("", 0, security.secure, &security.base_url),
     );
     headers
 }
@@ -407,7 +427,7 @@ struct PasswordInput {
 
 async fn change_password(
     State(state): State<AppState>,
-    Extension(RequestSecurity(secure)): Extension<RequestSecurity>,
+    Extension(security): Extension<RequestSecurity>,
     session: Session,
     Json(input): Json<PasswordInput>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -448,7 +468,7 @@ async fn change_password(
     })
     .await
     .map_err(save_error)??;
-    Ok((StatusCode::NO_CONTENT, expired_session(secure)))
+    Ok((StatusCode::NO_CONTENT, expired_session(&security)))
 }
 
 fn save_error(error: impl std::fmt::Display) -> AppError {
@@ -522,7 +542,7 @@ async fn save_general_settings(
 }
 
 fn app(state: AppState, web_access: web_access::AllowedHosts) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route(
             "/",
             get(|| async { Html(include_str!("../../frontend/index.html")) }),
@@ -562,7 +582,23 @@ fn app(state: AppState, web_access: web_access::AllowedHosts) -> Router {
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/change-password", post(change_password))
         .route("/api/v1/baidu/save-settings", post(save_baidu_settings))
-        .route("/api/v1/settings/save-general", post(save_general_settings))
+        .route("/api/v1/settings/save-general", post(save_general_settings));
+    let routes = if web_access.base_url().is_empty() {
+        routes
+    } else {
+        let prefix = web_access.base_url();
+        let root = format!("{prefix}/");
+        Router::new()
+            .route(
+                prefix,
+                get({
+                    let root = root.clone();
+                    move || async move { Redirect::permanent(&root) }
+                }),
+            )
+            .nest(&root, routes)
+    };
+    routes
         .layer(DefaultBodyLimit::max(24 * 1024))
         .layer(middleware::from_fn_with_state(
             web_access,
@@ -608,6 +644,12 @@ async fn main() -> io::Result<()> {
             ));
         }
     };
+    let base_url = match env::var("BASE_URL") {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => "/".to_owned(),
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    let allowed_hosts = allowed_hosts.with_base_url(&base_url)?;
     let listener =
         TcpListener::bind(env::var("WEB_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()))
             .await?;

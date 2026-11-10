@@ -1,5 +1,7 @@
 import { translate } from "./locale.js";
 
+const baseUrl = new URL(".", import.meta.url);
+
 const dialog = document.querySelector("#settings");
 const form = document.querySelector("#settings-form");
 const generalForm = document.querySelector("#general-settings-form");
@@ -106,7 +108,7 @@ async function refreshSession(message, renew = false) {
 }
 
 function postJson(path, payload) {
-  return fetch(path, {
+  return fetch(new URL(path.slice(1), baseUrl), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
