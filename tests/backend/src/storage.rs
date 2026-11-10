@@ -23,6 +23,7 @@ fn updates_provider_and_account_without_overwriting_each_other() {
     let general = GeneralSettings {
         download_directory: "/downloads/shared".to_owned(),
         language: Language::English,
+        base_url: "/tools/download-manager".to_owned(),
     };
     save_general(&path, &general).unwrap();
     assert!(import_baidu(&path, &settings, &GeneralSettings::default()).unwrap());
@@ -40,6 +41,10 @@ fn updates_provider_and_account_without_overwriting_each_other() {
     assert!(change_password(&path, "original-hash", "stale-hash").is_err());
     save_baidu(&path, &settings).unwrap();
     assert_eq!(load_general(&path).unwrap().language.code(), "en");
+    assert_eq!(
+        load_general(&path).unwrap().base_url,
+        "/tools/download-manager"
+    );
     assert_eq!(
         load_account_access(&path, false)
             .unwrap()
@@ -86,6 +91,7 @@ fn migrates_version_one_without_losing_account_or_baidu_settings() {
     let general = load_general(&path).unwrap();
     assert_eq!(general.download_directory, "/downloads/archive");
     assert_eq!(general.language.code(), "zh-CN");
+    assert_eq!(general.base_url, "/");
     let access = load_account_access(&path, false).unwrap();
     assert!(access.setup_mode().is_none());
     assert_eq!(access.account.unwrap().password_hash, "existing-hash");

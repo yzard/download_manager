@@ -56,23 +56,10 @@ impl AllowedHosts {
     }
 
     pub fn with_base_url(mut self, value: &str) -> io::Result<Self> {
-        let base = value.strip_suffix('/').unwrap_or(value);
-        if value != "/"
-            && (base.len() > 256
-                || !base.strip_prefix('/').is_some_and(|path| {
-                    path.split('/').all(|segment| {
-                        !matches!(segment, "" | "." | "..")
-                            && segment
-                                .bytes()
-                                .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte))
-                    })
-                }))
-        {
-            return Err(io::Error::other(
-                "BASE_URL must be / or a path such as /download-manager",
-            ));
-        }
-        self.base_url = Arc::from(base);
+        let base = crate::settings::normalize_base_url(value).map_err(|_| {
+            io::Error::other("BASE_URL must be / or a path such as /download-manager")
+        })?;
+        self.base_url = Arc::from(base.trim_end_matches('/'));
         Ok(self)
     }
 

@@ -17,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use settings::{
     BaiduSettings, DEFAULT_CHECK_INTERVAL_SECONDS, GeneralSettings, Language, Settings,
+    normalize_base_url,
 };
 use std::{
     env,
@@ -39,6 +40,7 @@ const DATABASE: &str = "/data/download_manager.sqlite3";
 #[derive(Clone)]
 struct AppState {
     settings: watch::Sender<Settings>,
+    base_url_from_env: bool,
     account_access: Arc<RwLock<auth::AccountAccess>>,
     save_lock: Arc<Mutex<()>>,
     status: Arc<RwLock<Snapshot>>,
@@ -154,6 +156,8 @@ struct SessionInfo {
     language: Language,
     refresh_in: Option<i64>,
     can_refresh: bool,
+    active_base_url: String,
+    base_url_from_env: bool,
     general: Option<GeneralSettings>,
     account_setup: Option<auth::AccountSetup>,
     username: Option<String>,
@@ -182,6 +186,12 @@ async fn session_info(
         general: authenticated.then_some(general),
         refresh_in: if authenticated { refresh_in } else { None },
         can_refresh,
+        active_base_url: if security.base_url.is_empty() {
+            "/".to_owned()
+        } else {
+            security.base_url.to_string()
+        },
+        base_url_from_env: state.base_url_from_env,
         account_setup,
         username: access
             .account
@@ -510,14 +520,35 @@ async fn save_baidu_settings(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneralSettingsInput {
+    download_directory: String,
+    language: Language,
+    base_url: Option<String>,
+}
+
 async fn save_general_settings(
     State(state): State<AppState>,
     session: Session,
-    Json(mut settings): Json<GeneralSettings>,
+    Json(input): Json<GeneralSettingsInput>,
 ) -> Result<Json<GeneralSettings>, AppError> {
     let guard = state.save_lock.clone().lock_owned().await;
     session.require_active().await?;
-    settings.download_directory = settings.download_directory.trim().to_owned();
+    let base_url = match input.base_url {
+        Some(_) if state.base_url_from_env => {
+            return Err(AppError(StatusCode::CONFLICT, "baseUrlFromEnvironment"));
+        }
+        Some(value) => normalize_base_url(value.trim())
+            .map_err(|error| AppError(StatusCode::BAD_REQUEST, error))?
+            .to_owned(),
+        None => state.settings.borrow().general.base_url.clone(),
+    };
+    let settings = GeneralSettings {
+        download_directory: input.download_directory.trim().to_owned(),
+        language: input.language,
+        base_url,
+    };
     settings
         .validate()
         .map_err(|error| AppError(StatusCode::BAD_REQUEST, error))?;
@@ -644,12 +675,17 @@ async fn main() -> io::Result<()> {
             ));
         }
     };
-    let base_url = match env::var("BASE_URL") {
-        Ok(value) => value,
-        Err(env::VarError::NotPresent) => "/".to_owned(),
+    let base_url_override = match env::var("BASE_URL") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(io::Error::other(error)),
     };
-    let allowed_hosts = allowed_hosts.with_base_url(&base_url)?;
+    let base_url_from_env = base_url_override.is_some();
+    let allowed_hosts = allowed_hosts.with_base_url(
+        base_url_override
+            .as_deref()
+            .unwrap_or(&initial.general.base_url),
+    )?;
     let listener =
         TcpListener::bind(env::var("WEB_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()))
             .await?;
@@ -657,13 +693,18 @@ async fn main() -> io::Result<()> {
     let status = Arc::new(RwLock::new(Snapshot::default()));
     let state = AppState {
         settings,
+        base_url_from_env,
         account_access: Arc::new(RwLock::new(account_access)),
         save_lock: Arc::default(),
         status: status.clone(),
     };
     let mut terminate = signal(SignalKind::terminate())?;
     let worker = tokio::spawn(async move { worker::run(updates, &status).await });
-    eprintln!("Download Manager listening on {}", listener.local_addr()?);
+    eprintln!(
+        "Download Manager listening on {}{}/",
+        listener.local_addr()?,
+        allowed_hosts.base_url()
+    );
     let result = axum::serve(
         listener,
         app(state, allowed_hosts).into_make_service_with_connect_info::<SocketAddr>(),
@@ -724,7 +765,7 @@ fn import_baidu() -> io::Result<()> {
     };
     let general = GeneralSettings {
         download_directory: input.download_directory,
-        language: Language::default(),
+        ..GeneralSettings::default()
     };
     baidu.validate().map_err(io::Error::other)?;
     general.validate().map_err(io::Error::other)?;

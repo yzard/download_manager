@@ -89,7 +89,9 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 
 ## 挂载到网站子路径
 
-在服务环境变量中设置 `BASE_URL: "/download-manager"`，然后重新创建容器。默认路径是 `/`。
+在网页右上角的「常规」中设置 Base URL，保存到 SQLite。下次重启时启用新路径。默认路径是 `/`。
+
+也可以在 Compose 中设置 `BASE_URL: "/download-manager"`，然后重新创建容器。环境变量优先。移除变量后，服务会在下次启动时读取 SQLite 的值。
 
 在现有 Caddy 站点块中添加以下路由。Caddy 和 Download Manager 必须能通过 Docker 网络相互访问。
 
@@ -102,7 +104,7 @@ reverse_proxy @downloadManager download_manager:8080
 
 ## 常规设置
 
-登录后，打开右上角的齿轮。在「常规」里选择下载保存位置和界面语言，然后保存。保存位置可以是 `/downloads` 或其子目录，例如 `/downloads/archive`。界面支持中文和英语。两项设置都存入 SQLite。
+登录后，打开右上角的齿轮。在「常规」里选择下载保存位置和界面语言，然后保存。保存位置可以是 `/downloads` 或其子目录，例如 `/downloads/archive`。界面支持中文和英语。这些设置都存入 SQLite。
 
 ## 百度专属设置
 

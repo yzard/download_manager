@@ -15,16 +15,18 @@ SELECT bduss
 const LOAD_GENERAL: &str = "
 SELECT download_directory
      , language
+     , base_url
   FROM general_settings
  WHERE singleton = 1";
 
 const SAVE_GENERAL: &str = "
-INSERT INTO general_settings (singleton, download_directory, language)
-VALUES (1, ?1, ?2)
+INSERT INTO general_settings (singleton, download_directory, language, base_url)
+VALUES (1, ?1, ?2, ?3)
 ON CONFLICT (singleton) DO UPDATE
 SET download_directory = excluded.download_directory
   , language = excluded.language
-WHERE ?3";
+  , base_url = excluded.base_url
+WHERE ?4";
 
 const SAVE_BAIDU: &str = "
 INSERT INTO baidu_settings (
@@ -56,14 +58,14 @@ fn connect(path: &Path) -> io::Result<Connection> {
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(io::Error::other)?;
-    if schema_version(&connection)? != 4 {
+    if schema_version(&connection)? != 5 {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io::Error::other)?;
         let version = schema_version(&transaction)?;
         match version {
             0 => transaction.execute_batch(include_str!("../schema.sql")),
-            1..=3 => {
+            1..=4 => {
                 for (target, migration) in [
                     (
                         2,
@@ -71,6 +73,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
                     ),
                     (3, include_str!("../migrations/003_general_settings.sql")),
                     (4, include_str!("../migrations/004_auth_sessions.sql")),
+                    (5, include_str!("../migrations/005_general_base_url.sql")),
                 ] {
                     if version < target {
                         transaction
@@ -80,7 +83,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
                 }
                 Ok(())
             }
-            4 => Ok(()),
+            5 => Ok(()),
             _ => {
                 return Err(io::Error::other(
                     "Database schema is newer than this Download Manager version",
@@ -88,9 +91,9 @@ fn connect(path: &Path) -> io::Result<Connection> {
             }
         }
         .map_err(io::Error::other)?;
-        if version < 4 {
+        if version < 5 {
             transaction
-                .pragma_update(None, "user_version", 4)
+                .pragma_update(None, "user_version", 5)
                 .map_err(io::Error::other)?;
         }
         transaction.commit().map_err(io::Error::other)?;
@@ -130,6 +133,7 @@ pub fn load_general(path: &Path) -> io::Result<GeneralSettings> {
             Ok(GeneralSettings {
                 download_directory: row.get(0)?,
                 language,
+                base_url: row.get(2)?,
             })
         })
         .optional()
@@ -152,6 +156,7 @@ fn write_general(
             params![
                 settings.download_directory,
                 settings.language.code(),
+                settings.base_url,
                 replace_existing
             ],
         )

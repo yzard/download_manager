@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS account_reset (
 CREATE TABLE IF NOT EXISTS general_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     download_directory TEXT NOT NULL,
-    language TEXT NOT NULL CHECK (language IN ('zh-CN', 'en'))
+    language TEXT NOT NULL CHECK (language IN ('zh-CN', 'en')),
+    base_url TEXT NOT NULL DEFAULT '/'
 );
 
 CREATE TABLE IF NOT EXISTS baidu_settings (

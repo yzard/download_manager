@@ -184,11 +184,21 @@ function resetSettingsForms() {
   }
 }
 
+function updateBaseUrlField() {
+  const field = generalForm.elements.base_url;
+  field.disabled = session.base_url_from_env;
+  field.value = field.disabled ? session.active_base_url : general.base_url;
+  const message = field.disabled ? "baseUrlFromEnvironment"
+    : general.base_url === session.active_base_url ? "baseUrlHelp" : "baseUrlPending";
+  showMessage(document.querySelector("#base-url-help"), message);
+}
+
 function openSettings() {
   if (dialog.open || !general || !current) return;
   resetSettingsForms();
   generalForm.elements.download_directory.value = general.download_directory;
   generalForm.elements.language.value = general.language;
+  updateBaseUrlField();
   form.elements.monitor_directory.value = current.monitor_directory || "";
   form.elements.check_interval_seconds.value = current.check_interval_seconds;
   form.elements.bduss.required = !current.has_tokens;
@@ -205,6 +215,7 @@ bindForm(generalForm, async (payload) => {
   general = await response.json();
   generalForm.elements.download_directory.value = general.download_directory;
   generalForm.elements.language.value = general.language;
+  updateBaseUrlField();
   applyLanguage(general.language);
 });
 

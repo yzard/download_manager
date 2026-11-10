@@ -80,6 +80,7 @@ impl Language {
 pub struct GeneralSettings {
     pub download_directory: String,
     pub language: Language,
+    pub base_url: String,
 }
 
 impl Default for GeneralSettings {
@@ -87,6 +88,7 @@ impl Default for GeneralSettings {
         Self {
             download_directory: "/downloads".to_owned(),
             language: Language::default(),
+            base_url: "/".to_owned(),
         }
     }
 }
@@ -129,6 +131,26 @@ impl GeneralSettings {
         }
         Ok(())
     }
+}
+
+pub fn normalize_base_url(value: &str) -> Result<&str, &'static str> {
+    if value == "/" {
+        return Ok(value);
+    }
+    let base = value.strip_suffix('/').unwrap_or(value);
+    if base.len() > 256
+        || !base.strip_prefix('/').is_some_and(|path| {
+            path.split('/').all(|segment| {
+                !matches!(segment, "" | "." | "..")
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-._~".contains(&byte))
+            })
+        })
+    {
+        return Err("invalidBaseUrl");
+    }
+    Ok(base)
 }
 
 #[derive(Clone)]
