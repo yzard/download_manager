@@ -7,7 +7,8 @@ on:
       - Dockerfile
       - entrypoint.sh
       - LICENSE.BaiduPCS-Go
-      - .dockerignore
+      - Dockerfile.dockerignore
+      - build_docker.sh
       - .github/workflows/publish-image.yml
   workflow_dispatch:
 
@@ -29,8 +30,4 @@ jobs:
       - name: Build and publish
         run: |
           docker buildx create --driver docker-container --use
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            --tag ghcr.io/yzard/baidupcs-go-srv:4.0.2 \
-            --push .
+          ./build_docker.sh --publish

@@ -1,5 +1,6 @@
 .git/
 .env
+.env.*
 config/
 downloads/
 *.log

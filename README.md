@@ -16,7 +16,7 @@ docker compose -f /data/docker/4_torrent.yaml pull baidupcs-go
 docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps baidupcs-go --version
 ```
 
-将 `/data/docker/4_torrent.yaml` 的权限设为 `600`，将 `/data/docker/configs/baidupcs-go` 的权限设为 `700`，因为它们保存登录凭据。容器启动时会切换到 `lsio.env` 提供的 `PUID` 和 `PGID`。这组 UID 和 GID 必须对配置目录及 `/downloads` 对应的宿主机目录有写入权限。
+将 `/data/docker/4_torrent.yaml` 的权限设为 `600`，将 `/data/docker/configs/baidupcs-go` 的权限设为 `700`，因为它们保存登录凭据。容器读取 `lsio.env` 中的 `PUID`、`PGID`、`UMASK` 和 `TZ`。这组 UID 和 GID 必须对配置目录及 `/downloads` 对应的宿主机目录有写入权限。
 
 服务通过 `docker compose up -d` 常驻，Docker 根据 `restart: always` 重启服务。单独使用本仓库时，可以改用根目录的 `docker-compose.yaml` 示例。
 

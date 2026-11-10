@@ -1,6 +1,20 @@
 #!/bin/sh
 set -eu
-umask 077
+
+case "${UMASK:-077}" in
+    [0-7][0-7][0-7]|0[0-7][0-7][0-7]) umask "${UMASK:-077}" ;;
+    *) echo "UMASK must contain three octal digits, optionally preceded by zero." >&2; exit 2 ;;
+esac
+
+if [ -n "${TZ:-}" ]; then
+    case "$TZ" in
+        /*|*..*) echo "TZ must be an IANA time zone." >&2; exit 2 ;;
+    esac
+    if [ ! -f "/usr/share/zoneinfo/$TZ" ]; then
+        echo "TZ must be an IANA time zone." >&2
+        exit 2
+    fi
+fi
 
 if [ "$(/bin/busybox id -u)" -eq 0 ]; then
     run_uid=${PUID:-1000}
@@ -37,7 +51,7 @@ login_from_environment() {
             *百度帐号登录成功:*) ;;
             *) echo "Baidu login failed. Check BAIDU_BDUSS and BAIDU_STOKEN." >&2; return 1 ;;
         esac
-        printf '%s\n' "$fingerprint" > "$login_hash_file"
+        (umask 077; printf '%s\n' "$fingerprint" > "$login_hash_file")
     fi
 }
 
