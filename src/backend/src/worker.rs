@@ -1,4 +1,4 @@
-use crate::settings::{Settings, save_private};
+use crate::settings::{BaiduSettings, save_private};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, io, path::Path, process::Stdio, time::Duration};
@@ -161,7 +161,7 @@ fn human_bytes(value: &str) -> Option<u64> {
     Some((number * 1024_f64.powi(power)).round() as u64)
 }
 
-async fn login(settings: &Settings) -> io::Result<bool> {
+async fn login(settings: &BaiduSettings) -> io::Result<bool> {
     let mut hash = Sha256::new();
     hash.update(settings.bduss.as_bytes());
     hash.update(b"\n");
@@ -200,7 +200,7 @@ async fn login(settings: &Settings) -> io::Result<bool> {
     Ok(true)
 }
 
-async fn download(settings: &Settings, status: &RwLock<Snapshot>) -> io::Result<bool> {
+async fn download(settings: &BaiduSettings, status: &RwLock<Snapshot>) -> io::Result<bool> {
     let destination = settings.clone();
     tokio::task::spawn_blocking(move || destination.prepare_destination())
         .await
@@ -261,7 +261,7 @@ async fn download(settings: &Settings, status: &RwLock<Snapshot>) -> io::Result<
 }
 
 pub async fn run(
-    mut settings: watch::Receiver<Settings>,
+    mut settings: watch::Receiver<BaiduSettings>,
     status: &RwLock<Snapshot>,
     interval: Duration,
 ) {
@@ -272,7 +272,13 @@ pub async fn run(
                 phase: "checking",
                 ..Snapshot::default()
             };
-            let result = download(&current, status).await;
+            let result = match download(&current, status).await {
+                Ok(completed) => completed,
+                Err(error) => {
+                    eprintln!("Baidu download check failed: {error}");
+                    false
+                }
+            };
             let mut snapshot = status.write().await;
             snapshot.queue_ready = true;
             for file in snapshot.files.values_mut() {
@@ -282,11 +288,7 @@ pub async fn run(
                 }
             }
             if !matches!(snapshot.phase, "login_failed" | "download_failed") {
-                snapshot.phase = if matches!(result, Ok(true)) {
-                    "idle"
-                } else {
-                    "download_failed"
-                };
+                snapshot.phase = if result { "idle" } else { "download_failed" };
             }
             eprintln!("Download check finished: {}", snapshot.phase);
         } else {
@@ -303,33 +305,5 @@ pub async fn run(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consumes_directory_file_queue_progress_and_completion() {
-        let mut s = Snapshot::default();
-        for line in [
-            "[1] 加入下载队列: /NAS下载",
-            "[2] 加入下载队列: /NAS下载/first video.mp4",
-            "[3] 加入下载队列: /NAS下载/second.txt",
-            "[1] ----",
-            "│ 类型 │ 目录 │",
-            "[2] ----",
-            "│ 文件大小 │ 230133000, 219.47MB │",
-            "[2] 准备下载: /NAS下载/first video.mp4",
-            "[2] ↓ 8.00MB/219.47MB 120.5KB/s in 2m10s, left - ............",
-        ] {
-            s.apply_line(line);
-        }
-        let files = s.files();
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].status, "active");
-        assert_eq!(files[0].total, Some(230133000));
-        assert_eq!(files[0].downloaded, 8388608);
-        assert_eq!(files[0].speed, 123392);
-        assert_eq!(files[1].status, "queued");
-        s.apply_line("[2] 下载完成, 保存位置: /downloads/first video.mp4");
-        assert_eq!(s.files()[1].status, "complete");
-    }
-}
+#[path = "../../../tests/backend/src/worker.rs"]
+mod tests;

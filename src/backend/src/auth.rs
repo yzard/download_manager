@@ -1,6 +1,5 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::http::{HeaderMap, HeaderValue, header};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io,
@@ -10,8 +9,7 @@ use std::{
 const SESSION_SECONDS: u64 = 8 * 60 * 60;
 const COOKIE: &str = "download_manager_session";
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 pub struct Account {
     pub username: String,
     pub password_hash: String,

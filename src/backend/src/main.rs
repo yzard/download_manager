@@ -1,27 +1,26 @@
 mod auth;
 mod settings;
 mod storage;
+mod web_access;
 mod worker;
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, FromRequestParts, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts},
-    middleware::{self, Next},
+    extract::{DefaultBodyLimit, FromRequestParts, State},
+    http::{HeaderMap, StatusCode, header, request::Parts},
+    middleware,
     response::{Html, IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use settings::Settings;
+use settings::BaiduSettings;
 use std::{
     env,
-    fs::OpenOptions,
     io::{self, Read},
-    os::unix::fs::OpenOptionsExt,
     path::Path,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     net::TcpListener,
@@ -30,11 +29,12 @@ use tokio::{
 };
 use worker::{Download, Snapshot};
 
-const CONFIG: &str = "/data/download_manager.sqlite3";
+const DATABASE: &str = "/data/download_manager.sqlite3";
 
 #[derive(Clone)]
 struct AppState {
-    settings: watch::Sender<Settings>,
+    baidu_settings: watch::Sender<BaiduSettings>,
+    account: Arc<RwLock<Option<auth::Account>>>,
     save_lock: Arc<Mutex<()>>,
     status: Arc<RwLock<Snapshot>>,
     sessions: Arc<Mutex<auth::Sessions>>,
@@ -51,8 +51,8 @@ struct Status {
     files: Vec<Download>,
 }
 
-async fn status(State(state): State<AppState>, _session: Session) -> Json<Status> {
-    let settings = state.settings.borrow().clone();
+async fn status(State(state): State<AppState>, _session: Session, _body: Bytes) -> Json<Status> {
+    let settings = state.baidu_settings.borrow().clone();
     let snapshot = state.status.read().await;
     Json(Status {
         provider: "baidu",
@@ -71,7 +71,7 @@ async fn status(State(state): State<AppState>, _session: Session) -> Json<Status
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SettingsInput {
+struct BaiduSettingsInput {
     #[serde(default)]
     bduss: String,
     #[serde(default)]
@@ -122,8 +122,12 @@ struct SessionInfo {
     username: Option<String>,
 }
 
-async fn session_info(State(state): State<AppState>, headers: HeaderMap) -> Json<SessionInfo> {
-    let account = state.settings.borrow().account.clone();
+async fn session_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    _body: Bytes,
+) -> Json<SessionInfo> {
+    let account = state.account.read().await.clone();
     let authenticated = if let Some(token) = auth::session_token(&headers) {
         state.sessions.lock().await.contains(token)
     } else {
@@ -152,7 +156,7 @@ async fn login(
         return Err(AppError(StatusCode::TOO_MANY_REQUESTS, "请稍等一秒再试。"));
     }
     let _guard = state.save_lock.lock().await;
-    let account = state.settings.borrow().account.clone().ok_or(AppError(
+    let account = state.account.read().await.clone().ok_or(AppError(
         StatusCode::CONFLICT,
         "请先在服务器上初始化允许登录的账号。",
     ))?;
@@ -161,7 +165,10 @@ async fn login(
         password_matches && input.username == account.username
     })
     .await
-    .unwrap_or(false);
+    .map_err(|error| {
+        eprintln!("Password verification failed: {error}");
+        AppError(StatusCode::INTERNAL_SERVER_ERROR, "无法验证密码。")
+    })?;
     if !verified {
         return Err(AppError(StatusCode::UNAUTHORIZED, "用户名或密码错误。"));
     }
@@ -209,46 +216,41 @@ async fn change_password(
     // Keep the write and session revocation together even if the browser disconnects.
     tokio::spawn(async move {
         let _guard = guard;
-        let mut settings = state.settings.borrow().clone();
-        let account = settings
+        let account = state
             .account
-            .as_mut()
+            .read()
+            .await
+            .clone()
             .ok_or(AppError(StatusCode::UNAUTHORIZED, "请先登录。"))?;
-        let old_hash = account.password_hash.clone();
-        let new_hash = tokio::task::spawn_blocking(move || {
-            if !auth::verify_password(&input.current_password, &old_hash) {
+        let saved_account = tokio::task::spawn_blocking(move || {
+            if !auth::verify_password(&input.current_password, &account.password_hash) {
                 return Err(AppError(StatusCode::BAD_REQUEST, "当前密码错误。"));
             }
-            auth::hash_password(&input.new_password).map_err(|_| save_error())
+            let new_hash = auth::hash_password(&input.new_password).map_err(save_error)?;
+            storage::change_password(Path::new(DATABASE), &account.password_hash, &new_hash)
+                .map_err(save_error)?;
+            Ok::<_, AppError>(auth::Account {
+                password_hash: new_hash,
+                ..account
+            })
         })
         .await
-        .map_err(|_| save_error())??;
-        account.password_hash = new_hash;
-        let saved = tokio::task::spawn_blocking(move || {
-            settings.save(Path::new(CONFIG))?;
-            Ok::<_, io::Error>(settings)
-        })
-        .await
-        .map_err(|_| save_error())?
-        .map_err(|_| save_error())?;
+        .map_err(save_error)??;
         let mut sessions = state.sessions.lock().await;
-        // Password changes update the account without waking the download worker.
-        state.settings.send_if_modified(|settings| {
-            settings.account = saved.account;
-            false
-        });
+        *state.account.write().await = Some(saved_account);
         sessions.clear();
         Ok::<_, AppError>(())
     })
     .await
-    .map_err(|_| save_error())??;
+    .map_err(save_error)??;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, auth::expired_cookie())],
     ))
 }
 
-fn save_error() -> AppError {
+fn save_error(error: impl std::fmt::Display) -> AppError {
+    eprintln!("Cannot save Download Manager configuration: {error}");
     AppError(
         StatusCode::INTERNAL_SERVER_ERROR,
         "无法保存设置，请检查配置目录权限。",
@@ -258,11 +260,11 @@ fn save_error() -> AppError {
 async fn save_settings(
     State(state): State<AppState>,
     session: Session,
-    Json(input): Json<SettingsInput>,
+    Json(input): Json<BaiduSettingsInput>,
 ) -> Result<StatusCode, AppError> {
     let guard = state.save_lock.clone().lock_owned().await;
     session.require_active(&state).await?;
-    let mut settings = state.settings.borrow().clone();
+    let mut settings = state.baidu_settings.borrow().clone();
     if !input.bduss.trim().is_empty() {
         settings.bduss = input.bduss.trim().to_owned();
     }
@@ -282,74 +284,27 @@ async fn save_settings(
                 "无法使用这个保存目录，请检查它是否为真实目录，以及容器是否有写入权限。",
             )
         })?;
-        settings.save(Path::new(CONFIG)).map_err(|_| save_error())?;
-        state.settings.send_replace(settings);
+        storage::save_baidu(Path::new(DATABASE), &settings, true).map_err(save_error)?;
+        state.baidu_settings.send_replace(settings);
         Ok::<_, AppError>(())
     })
     .await
-    .map_err(|_| save_error())??;
+    .map_err(save_error)??;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn local_requests(request: Request, next: Next) -> Response {
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
-    let start = Instant::now();
-    let host = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
-    let local_host = host
-        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
-        .is_some_and(|value| matches!(value.host(), "localhost" | "127.0.0.1" | "[::1]"));
-    let same_origin = host.is_some_and(|host| {
-        request
-            .headers()
-            .get(header::ORIGIN)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|origin| origin.strip_prefix("http://"))
-            == Some(host)
-    });
-    let mut response =
-        if !local_host || (matches!(method, Method::PUT | Method::POST) && !same_origin) {
-            StatusCode::FORBIDDEN.into_response()
-        } else {
-            next.run(request).await
-        };
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
-    );
-    response.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    // Polling status requests are omitted to keep download logs readable.
-    if !matches!(path.as_str(), "/api/status" | "/api/session") || !response.status().is_success() {
-        eprintln!(
-            "{method} {path:?} {} {}ms",
-            response.status().as_u16(),
-            start.elapsed().as_millis()
-        );
-    }
-    response
-}
-
-fn app(state: AppState) -> Router {
+fn app(state: AppState, web_access: web_access::AllowedHosts) -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { Html(include_str!("../web/index.html")) }),
+            get(|| async { Html(include_str!("../../frontend/index.html")) }),
         )
         .route(
             "/app.js",
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../web/app.js"),
+                    include_str!("../../frontend/app.js"),
                 )
             }),
         )
@@ -358,18 +313,21 @@ fn app(state: AppState) -> Router {
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../web/style.css"),
+                    include_str!("../../frontend/style.css"),
                 )
             }),
         )
-        .route("/api/status", get(status))
-        .route("/api/session", get(session_info))
-        .route("/api/login", post(login))
-        .route("/api/logout", post(logout))
-        .route("/api/password", put(change_password))
-        .route("/api/settings/baidu", put(save_settings))
+        .route("/api/v1/baidu/status", post(status))
+        .route("/api/v1/auth/session", post(session_info))
+        .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/change-password", post(change_password))
+        .route("/api/v1/baidu/save-settings", post(save_settings))
         .layer(DefaultBodyLimit::max(24 * 1024))
-        .layer(middleware::from_fn(local_requests))
+        .layer(middleware::from_fn_with_state(
+            web_access,
+            web_access::handle,
+        ))
         .with_state(state)
 }
 
@@ -386,20 +344,27 @@ async fn main() -> io::Result<()> {
             ));
         }
     }
-    let initial = Settings::load(Path::new(CONFIG)).map_err(io::Error::other)?;
+    let initial = storage::load_baidu(Path::new(DATABASE))?;
+    let account = storage::load_account(Path::new(DATABASE))?;
     let interval = env::var("CHECK_INTERVAL_SECONDS")
         .unwrap_or_else(|_| "300".to_owned())
         .parse::<u64>()
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| io::Error::other("CHECK_INTERVAL_SECONDS must be a positive integer"))?;
+    let allowed_hosts = match env::var("WEB_ALLOWED_HOSTS") {
+        Ok(value) => web_access::AllowedHosts::parse(&value)?,
+        Err(env::VarError::NotPresent) => web_access::AllowedHosts::default(),
+        Err(error) => return Err(io::Error::other(error)),
+    };
     let listener =
         TcpListener::bind(env::var("WEB_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()))
             .await?;
     let (settings, updates) = watch::channel(initial);
     let status = Arc::new(RwLock::new(Snapshot::default()));
     let state = AppState {
-        settings,
+        baidu_settings: settings,
+        account: Arc::new(RwLock::new(account)),
         save_lock: Arc::default(),
         status: status.clone(),
         sessions: Arc::default(),
@@ -410,7 +375,7 @@ async fn main() -> io::Result<()> {
             async move { worker::run(updates, &status, Duration::from_secs(interval)).await },
         );
     eprintln!("Download Manager listening on {}", listener.local_addr()?);
-    let result = axum::serve(listener, app(state))
+    let result = axum::serve(listener, app(state, allowed_hosts))
         .with_graceful_shutdown(async move {
             tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
         })
@@ -426,16 +391,8 @@ fn init_user(username: &str) -> io::Result<()> {
             "Username must be 1–64 letters, digits, dots, underscores or hyphens",
         ));
     }
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .open("/data/.account-init.lock")?;
-    lock.lock()?;
-    let path = Path::new(CONFIG);
-    let mut settings = Settings::load(path).map_err(io::Error::other)?;
-    if settings.account.is_some() {
+    let path = Path::new(DATABASE);
+    if storage::load_account(path)?.is_some() {
         return Err(io::Error::other(
             "The allowed account is already configured",
         ));
@@ -449,11 +406,15 @@ fn init_user(username: &str) -> io::Result<()> {
     if password != rpassword::prompt_password("Confirm password: ")? {
         return Err(io::Error::other("Passwords did not match"));
     }
-    settings.account = Some(auth::Account {
+    let account = auth::Account {
         username: username.to_owned(),
         password_hash: auth::hash_password(&password)?,
-    });
-    settings.save(path)?;
+    };
+    if !storage::create_account(path, &account)? {
+        return Err(io::Error::other(
+            "The allowed account is already configured",
+        ));
+    }
     println!("Allowed account configured. Restart Download Manager to load it.");
     Ok(())
 }
@@ -464,19 +425,18 @@ fn import_baidu() -> io::Result<()> {
     if input.len() > 24 * 1024 {
         return Err(io::Error::other("Import input is too large"));
     }
-    let input: SettingsInput =
+    let input: BaiduSettingsInput =
         serde_json::from_str(&input).map_err(|_| io::Error::other("Invalid Baidu import input"))?;
-    let path = Path::new(CONFIG);
-    let mut settings = Settings::load(path)?;
-    if settings.has_tokens() {
+    let settings = BaiduSettings {
+        bduss: input.bduss,
+        stoken: input.stoken,
+        monitor_directory: input.monitor_directory,
+        download_directory: input.download_directory,
+    };
+    settings.validate().map_err(io::Error::other)?;
+    if !storage::save_baidu(Path::new(DATABASE), &settings, false)? {
         return Err(io::Error::other("Baidu settings are already configured"));
     }
-    settings.bduss = input.bduss;
-    settings.stoken = input.stoken;
-    settings.monitor_directory = input.monitor_directory;
-    settings.download_directory = input.download_directory;
-    settings.validate().map_err(io::Error::other)?;
-    settings.save(path)?;
     println!("Baidu settings imported into SQLite.");
     Ok(())
 }

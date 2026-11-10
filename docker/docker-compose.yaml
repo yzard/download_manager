@@ -1,0 +1,12 @@
+services:
+  download_manager:
+    container_name: download_manager
+    image: ghcr.io/yzard/download_manager:4.0.2
+    env_file: ../playground/.env
+    volumes:
+      - ../playground/config:/config
+      - ../playground/data/download_manager:/data
+      - ../playground/downloads:/downloads
+    ports:
+      - "0.0.0.0:8085:8080"
+    restart: always

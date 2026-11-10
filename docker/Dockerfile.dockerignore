@@ -1,0 +1,8 @@
+**
+!docker/entrypoint.sh
+!src/backend/Cargo.lock
+!src/backend/Cargo.toml
+!src/backend/schema.sql
+!src/backend/src/**
+!src/frontend/**
+!LICENSE.BaiduPCS-Go

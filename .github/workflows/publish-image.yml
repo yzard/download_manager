@@ -4,15 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - Dockerfile
-      - entrypoint.sh
-      - Cargo.toml
-      - Cargo.lock
-      - schema.sql
+      - docker/Dockerfile
+      - docker/Dockerfile.dockerignore
+      - docker/entrypoint.sh
       - 'src/**'
-      - 'web/**'
       - LICENSE.BaiduPCS-Go
-      - Dockerfile.dockerignore
       - build_docker.sh
       - .github/workflows/publish-image.yml
   workflow_dispatch:

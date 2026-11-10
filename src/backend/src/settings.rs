@@ -1,40 +1,25 @@
-use crate::auth::Account;
-use serde::{Deserialize, Serialize};
 use std::{fs, io, io::Write, path::Path};
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Settings {
+#[derive(Clone)]
+pub struct BaiduSettings {
     pub bduss: String,
     pub stoken: String,
     pub monitor_directory: String,
-    #[serde(default = "default_download_directory")]
     pub download_directory: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account: Option<Account>,
 }
 
-impl Default for Settings {
+impl Default for BaiduSettings {
     fn default() -> Self {
         Self {
             bduss: String::new(),
             stoken: String::new(),
             monitor_directory: String::new(),
-            download_directory: default_download_directory(),
-            account: None,
+            download_directory: "/downloads".to_owned(),
         }
     }
 }
 
-fn default_download_directory() -> String {
-    "/downloads".to_owned()
-}
-
-impl Settings {
-    pub fn load(path: &Path) -> io::Result<Self> {
-        crate::storage::load(path)
-    }
-
+impl BaiduSettings {
     pub fn has_tokens(&self) -> bool {
         !self.bduss.trim().is_empty() && !self.stoken.trim().is_empty()
     }
@@ -97,10 +82,6 @@ impl Settings {
             }
         }
         Ok(())
-    }
-
-    pub fn save(&self, path: &Path) -> io::Result<()> {
-        crate::storage::save(path, self)
     }
 }
 

@@ -26,14 +26,15 @@ FROM busybox:1.37.0-musl AS runtime-tools
 FROM rust:1.99-alpine AS web-build
 ARG TARGETARCH
 RUN apk add --no-cache musl-dev
-WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-COPY web/ ./web/
-COPY schema.sql ./
+ENV CARGO_TARGET_DIR=/build/target
+WORKDIR /build/src/backend
+COPY src/backend/Cargo.toml src/backend/Cargo.lock ./
+COPY src/backend/schema.sql ./
+COPY src/backend/src/ ./src/
+COPY src/frontend/ ../frontend/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=download_manager-${TARGETARCH},target=/build/target \
-    cargo build --locked --release && cp target/release/download_manager /download_manager
+    --mount=type=cache,id=download_manager-${TARGETARCH},target=/build/target,sharing=locked \
+    cargo build --locked --release && cp /build/target/release/download_manager /download_manager
 
 FROM scratch
 
@@ -43,7 +44,7 @@ COPY --from=runtime-tools /bin/busybox /bin/busybox
 COPY --from=download /usr/local/bin/BaiduPCS-Go /usr/local/bin/BaiduPCS-Go
 COPY --from=web-build /download_manager /usr/local/bin/download_manager
 COPY --from=download --chown=1000:1000 /rootfs/ /
-COPY entrypoint.sh /entrypoint.sh
+COPY docker/entrypoint.sh /entrypoint.sh
 COPY LICENSE.BaiduPCS-Go /licenses/BaiduPCS-Go.txt
 
 ENV HOME=/config \

@@ -8,6 +8,25 @@ Download Manager 提供 Rust API 和 JavaScript 页面，显示下载文件、�
 
 镜像地址为 `ghcr.io/yzard/download_manager:4.0.2`。NAS 从 GHCR 拉取镜像。
 
+## 本地开发
+
+Rust 后端在 `src/backend/`，网页在 `src/frontend/`。测试在 `tests/backend/`，容器配置在 `docker/`。
+
+在仓库根目录运行 Rust 测试。
+
+```sh
+cargo test --manifest-path src/backend/Cargo.toml --target-dir build/backend --locked
+```
+
+用 Docker Compose 和 Python 3 运行 `./run_playground.sh`，构建镜像并启动本地服务。运行数据保存在 `playground/`。在另一终端初始化本地账号。
+
+```sh
+docker compose -f docker/docker-compose.yaml run --rm --no-deps -it download_manager init-user operator
+docker compose -f docker/docker-compose.yaml restart download_manager
+```
+
+打开 `http://127.0.0.1:8085`。如需通过局域网访问，在 `playground/.env` 的 `WEB_ALLOWED_HOSTS` 中填入本机地址和端口。
+
 ## NAS Compose 配置
 
 在 `/data/docker/4_torrent.yaml` 中使用下面的服务配置。`lsio.env` 提供 `PUID`、`PGID`、`UMASK` 和 `TZ`。
@@ -21,8 +40,9 @@ services:
     env_file: ./lsio.env
     environment:
       CHECK_INTERVAL_SECONDS: "300"
+      WEB_ALLOWED_HOSTS: "192.168.1.10:8085"
     ports:
-      - "127.0.0.1:8085:8080"
+      - "0.0.0.0:8085:8080"
     volumes:
       - ./data/download_manager:/data
       - ./configs/download_manager:/config
@@ -56,13 +76,9 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps --force-recreate d
 
 ## 打开网页
 
-在自己的电脑上建立 SSH 隧道。
+在局域网浏览器打开 `http://192.168.1.10:8085`。将示例地址替换为你的 NAS 地址，并把相同的主机和端口填入 `WEB_ALLOWED_HOSTS`。多个地址用逗号分隔。用初始化的账号登录。
 
-```sh
-ssh -N -L 8085:127.0.0.1:8085 nas
-```
-
-然后打开 `http://127.0.0.1:8085`。如果 Docker 在当前电脑运行，直接打开该地址即可。用允许登录的账号进入 Download Manager。
+网页使用 `/api/v1/auth/` 和 `/api/v1/baidu/` 下的 POST 接口。浏览器会话需要同源请求。
 
 ## 百度专属设置
 

@@ -38,8 +38,8 @@ function showSession(next, message) {
     ? "使用预先配置的账号登录。"
     : "请在服务器上初始化允许登录的账号。");
   if (!signedIn) {
-    dialog.close();
     passwordDialog.close();
+    dialog.close();
     current = undefined;
     setupShown = false;
     rows.replaceChildren();
@@ -48,18 +48,22 @@ function showSession(next, message) {
 
 async function refreshSession(message) {
   const generation = sessionGeneration;
-  const response = await fetch("/api/session");
+  const response = await postJson("/api/v1/auth/session", {});
   if (!response.ok) throw new Error("无法连接登录服务。");
   const next = await response.json();
   if (generation === sessionGeneration) showSession(next, message);
 }
 
-async function submitJson(path, method, payload) {
-  const response = await fetch(path, {
-    method,
+function postJson(path, payload) {
+  return fetch(path, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+async function submitJson(path, payload) {
+  const response = await postJson(path, payload);
   if (!response.ok) {
     const details = await response.json().catch(() => ({}));
     throw new Error(details.error || "请求失败，请稍后再试。");
@@ -84,14 +88,14 @@ function bindForm(form, onSubmit) {
 }
 
 bindForm(loginForm, async (payload) => {
-  await submitJson("/api/login", "POST", payload);
+  await submitJson("/api/v1/auth/login", payload);
   loginForm.reset();
   await refreshSession();
 });
 
 document.querySelector("#logout").addEventListener("click", async () => {
   try {
-    await submitJson("/api/logout", "POST", {});
+    await submitJson("/api/v1/auth/logout", {});
     await refreshSession();
   } catch (failure) {
     status.textContent = failure.message;
@@ -117,7 +121,7 @@ document.querySelector("#open-settings").addEventListener("click", openSettings)
 document.querySelector("#close-settings").addEventListener("click", () => dialog.close());
 
 bindForm(form, async (payload) => {
-  await submitJson("/api/settings/baidu", "PUT", payload);
+  await submitJson("/api/v1/baidu/save-settings", payload);
   dialog.close();
   status.textContent = "设置已保存";
 });
@@ -125,7 +129,6 @@ bindForm(form, async (payload) => {
 dialog.addEventListener("close", () => form.reset());
 
 document.querySelector("#open-password").addEventListener("click", () => {
-  dialog.close();
   passwordForm.reset();
   passwordForm.querySelector(".error").textContent = "";
   passwordDialog.showModal();
@@ -134,7 +137,7 @@ document.querySelector("#close-password").addEventListener("click", () => passwo
 passwordDialog.addEventListener("close", () => passwordForm.reset());
 bindForm(passwordForm, async ({ current_password, new_password, confirm_password }) => {
   if (new_password !== confirm_password) throw new Error("两次输入的新密码不一致。");
-  await submitJson("/api/password", "PUT", { current_password, new_password });
+  await submitJson("/api/v1/auth/change-password", { current_password, new_password });
   passwordDialog.close();
   await refreshSession("密码已更新，请重新登录。");
 });
@@ -189,12 +192,13 @@ function renderFile(file, provider) {
 
 async function refresh() {
   try {
+    if (document.hidden || dialog.open || passwordDialog.open) return;
     if (!session || !session.account_configured) {
       await refreshSession();
     }
     if (!session?.username) return;
     const generation = sessionGeneration;
-    const response = await fetch("/api/status");
+    const response = await postJson("/api/v1/baidu/status", {});
     if (generation !== sessionGeneration) return;
     if (response.status === 401) {
       await refreshSession("登录已过期，请重新登录。");
@@ -202,7 +206,7 @@ async function refresh() {
     }
     if (!response.ok) throw new Error();
     const next = await response.json();
-    if (generation !== sessionGeneration) return;
+    if (generation !== sessionGeneration || dialog.open || passwordDialog.open) return;
     current = next;
     status.textContent = phases[current.phase] || "正在启动";
     document.querySelector("#monitor-directory").textContent = current.monitor_directory || "尚未选择监控目录";
