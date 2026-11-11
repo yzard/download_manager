@@ -42,3 +42,26 @@ fn rejects_wrong_bytes_resume_files_and_symlinks() {
     std::os::unix::fs::symlink(path, &link).unwrap();
     assert!(verify_local(&link, 6, checksum).is_err());
 }
+
+#[test]
+fn distinguishes_missing_metadata_from_transient_or_malformed_output() {
+    let path = "/work/file.txt";
+    let missing =
+        "获取文件/目录的元信息: 遇到错误, 远端服务器返回错误, 代码: 31066, 消息: 文件或目录不存在";
+    let other = "获取文件/目录的元信息: 遇到错误, 远端服务器返回错误, 代码: 31034, 消息: temporarily unavailable";
+    assert_eq!(
+        parse_cloud_file(missing, path).err().unwrap().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        parse_cloud_file(other, path).err().unwrap().to_string(),
+        "Baidu metadata request failed with code 31034"
+    );
+    assert_eq!(
+        parse_cloud_file("network error", path)
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+}

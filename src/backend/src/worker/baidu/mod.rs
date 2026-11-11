@@ -210,7 +210,20 @@ impl DownloadSession for BaiduSession {
         .map_err(io::Error::other)??;
         let literal = listing::literal_path(&file.path)
             .ok_or_else(|| io::Error::other("Invalid Baidu file path"))?;
-        let cloud = cleanup::cloud_file(&file.path).await?;
+        let cloud = match cleanup::cloud_file(&file.path).await {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                cleanup::cloud_file(&file.path).await?
+            }
+            result => result?,
+        };
         if cloud.fs_id.to_string() != file.remote_id {
             return Err(io::Error::other("Baidu file changed before download"));
         }
@@ -290,6 +303,7 @@ struct BaiduProgress {
     metadata: FileMetadata,
     finished: bool,
     failed: bool,
+    error_code: Option<i32>,
     cloud_file: Option<CloudFile>,
     saved_path: Option<String>,
     value: TransferProgress,
@@ -304,6 +318,7 @@ impl BaiduProgress {
             metadata: FileMetadata::default(),
             finished: false,
             failed: false,
+            error_code: None,
             cloud_file: None,
             saved_path: None,
             value: file.progress,
@@ -341,7 +356,11 @@ impl BaiduProgress {
 
     fn apply_event(&mut self, event: &str) {
         let value = &mut self.value;
+        if let Some(code) = cleanup::pcs_error_code(event) {
+            self.error_code = Some(code);
+        }
         if event == "----" {
+            self.error_code = None;
             self.metadata = FileMetadata::default();
             self.cloud_file = None;
             self.saved_path = None;
@@ -430,7 +449,8 @@ impl DownloadTransfer for BaiduTransfer {
             self.line.clear();
         }
         let mut value = self.progress.value;
-        if !self.child.wait().await?.success()
+        let exit = self.child.wait().await?;
+        if !exit.success()
             || !self.progress.finished
             || self.progress.failed
             || !matches!(
@@ -439,6 +459,17 @@ impl DownloadTransfer for BaiduTransfer {
             )
         {
             value.status = DownloadState::Failed;
+            if let Some(code) = self.progress.error_code {
+                eprintln!(
+                    "Baidu transfer failed for {:?}: Baidu error code {code}",
+                    self.progress.path
+                );
+            } else {
+                eprintln!(
+                    "Baidu transfer failed for {:?}: BaiduPCS-Go did not report success ({exit})",
+                    self.progress.path
+                );
+            }
         }
         value.speed = 0;
         Ok(TransferEvent::Finished(value))

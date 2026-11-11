@@ -140,25 +140,50 @@ fn verify_local(path: &Path, size: u64, expected_md5: &str) -> io::Result<Metada
     Ok(before)
 }
 
-pub(super) async fn cloud_file(path: &str) -> io::Result<CloudFile> {
-    let literal = literal_path(path).ok_or_else(|| io::Error::other("Invalid Baidu file path"))?;
-    let output = run_cli(&["meta", &literal]).await?;
-    if output
+pub(super) fn pcs_error_code(line: &str) -> Option<i32> {
+    let (_, error) = line.split_once("远端服务器返回错误, 代码: ")?;
+    let (code, _) = error.split_once(", 消息: ")?;
+    code.parse().ok()
+}
+
+fn parse_cloud_file(output: &str, path: &str) -> io::Result<CloudFile> {
+    let mut errors = output
         .lines()
-        .any(|line| line.ends_with("代码: 31066, 消息: 文件或目录不存在"))
-    {
+        .filter_map(|line| line.strip_prefix("获取文件/目录的元信息: "));
+    if let Some(code) = errors.clone().find_map(pcs_error_code) {
+        if code == 31066 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Baidu file is absent",
+            ));
+        }
+        return Err(io::Error::other(format!(
+            "Baidu metadata request failed with code {code}"
+        )));
+    }
+    if errors.any(|line| line.starts_with("网络错误,")) {
         return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Baidu file is absent",
+            io::ErrorKind::ConnectionAborted,
+            "Baidu metadata network error",
         ));
     }
     let mut metadata = FileMetadata::default();
     let mut files = output.lines().filter_map(|line| metadata.read_line(line));
-    let file = files
+    files
         .next()
         .filter(|file| file.path == path && files.next().is_none())
-        .ok_or_else(|| io::Error::other("Baidu file identity could not be verified"))?;
-    Ok(file)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Baidu did not return usable file metadata",
+            )
+        })
+}
+
+pub(super) async fn cloud_file(path: &str) -> io::Result<CloudFile> {
+    let literal = literal_path(path).ok_or_else(|| io::Error::other("Invalid Baidu file path"))?;
+    let output = run_cli(&["meta", &literal]).await?;
+    parse_cloud_file(&output, path)
 }
 
 pub(super) async fn move_to_recycle_bin(path: &str) -> io::Result<()> {

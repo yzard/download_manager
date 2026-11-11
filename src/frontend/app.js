@@ -291,7 +291,7 @@ function renderFile(file, row = document.createElement("tr")) {
   if (!row.cells.length) {
     for (let index = 0; index < 7; index++) row.insertCell();
     row.cells[6].className = "task-actions";
-    row.cells[6].append(actionButton("Ⅱ", "pause"), actionButton("×", "remove"));
+    row.cells[6].append(actionButton("", "pause"), actionButton("×", "remove"));
   }
   row.dataset.id = file.id;
   row.dataset.provider = file.provider;
@@ -333,7 +333,6 @@ function renderFile(file, row = document.createElement("tr")) {
 
   const [pause, remove] = actions.children;
   pause.hidden = complete;
-  pause.textContent = paused ? "▶︎" : "Ⅱ";
   pause.dataset.action = paused ? "resume" : "pause";
   labelAction(pause, paused ? "resumeDownload" : "pauseDownload");
   const queue = downloadStatus.queues.find((entry) => entry.provider === file.provider);

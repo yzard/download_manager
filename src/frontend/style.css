@@ -91,6 +91,29 @@ input, select { display: block; width: 100%; margin-top: 4px; padding: 9px; font
 .task-actions { padding-inline: 12px; }
 .task-actions button { width: 32px; height: 32px; padding: 0; font-size: 18px; line-height: 1; }
 .task-actions button + button { margin-left: 6px; }
+.task-actions button:is([data-action="pause"], [data-action="resume"]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+.task-actions button[data-action="pause"]::before,
+.task-actions button[data-action="pause"]::after {
+  content: "";
+  width: 3px;
+  height: 12px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.task-actions button[data-action="resume"]::before {
+  content: "";
+  width: 10px;
+  height: 12px;
+  margin-left: 2px;
+  background: currentColor;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
 .task-actions button[data-action="remove"]:hover { color: #a62a31; background: #fff0f1; }
 .account-settings { border-top: 1px solid var(--border); padding-top: 12px; }
 .account-settings h3 { font-size: 14px; margin: 0 0 8px; }
