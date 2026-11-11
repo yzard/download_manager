@@ -55,7 +55,7 @@ fn distinguishes_missing_metadata_from_transient_or_malformed_output() {
     );
     assert_eq!(
         parse_cloud_file(other, path).err().unwrap().to_string(),
-        "Baidu metadata request failed with code 31034"
+        "Provider error code 31034"
     );
     assert_eq!(
         parse_cloud_file("network error", path)

@@ -7,6 +7,7 @@ fn parses_progress_and_rejects_metadata_for_a_replaced_file() {
         provider: "baidu",
         path: "/NAS下载/新文件.txt".to_owned(),
         remote_id: "123".to_owned(),
+        last_failure: None,
         progress: TransferProgress {
             status: DownloadState::Active,
             downloaded: 0,
@@ -36,4 +37,19 @@ fn parses_progress_and_rejects_metadata_for_a_replaced_file() {
     assert!(progress.finished);
     assert_eq!(progress.value.status, DownloadState::Complete);
     assert!(progress.saved_path.is_some());
+}
+
+#[test]
+fn reports_only_a_classified_reason_from_provider_output() {
+    assert_eq!(
+        transfer_failure(
+            "下载失败: 网络错误, TLS handshake timeout https://example.test/sensitive"
+        ),
+        Some(FailureReason::TlsHandshakeTimeout)
+    );
+    assert_eq!(
+        transfer_failure("遇到错误, 远端服务器返回错误, 代码: 31034, 消息: internal"),
+        Some(FailureReason::ProviderError(31034))
+    );
+    assert_eq!(transfer_failure("下载失败: unrecognized detail"), None);
 }

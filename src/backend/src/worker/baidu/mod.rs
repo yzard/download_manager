@@ -2,8 +2,8 @@ mod cleanup;
 mod listing;
 
 use super::{
-    Download, DownloadProvider, DownloadSession, DownloadState, DownloadTransfer, RemoteFile,
-    TransferEvent, TransferProgress,
+    Download, DownloadProvider, DownloadSession, DownloadState, DownloadTransfer, FailureReason,
+    RemoteFile, TransferEvent, TransferProgress,
 };
 use crate::settings::{BaiduSettings, Settings, save_private};
 use cleanup::{CloudFile, FileMetadata};
@@ -225,7 +225,7 @@ impl DownloadSession for BaiduSession {
             result => result?,
         };
         if cloud.fs_id.to_string() != file.remote_id {
-            return Err(io::Error::other("Baidu file changed before download"));
+            return Err(io::Error::other(FailureReason::FileChanged));
         }
         let mut child = Command::new("/bin/busybox")
             .args([
@@ -303,7 +303,7 @@ struct BaiduProgress {
     metadata: FileMetadata,
     finished: bool,
     failed: bool,
-    error_code: Option<i32>,
+    failure: Option<FailureReason>,
     cloud_file: Option<CloudFile>,
     saved_path: Option<String>,
     value: TransferProgress,
@@ -318,7 +318,7 @@ impl BaiduProgress {
             metadata: FileMetadata::default(),
             finished: false,
             failed: false,
-            error_code: None,
+            failure: None,
             cloud_file: None,
             saved_path: None,
             value: file.progress,
@@ -328,8 +328,11 @@ impl BaiduProgress {
     fn apply(&mut self, line: &str) {
         if line.starts_with("下载结束, 时间:") {
             self.finished = true;
-        } else if line.contains("以下文件下载失败") || line.contains("未登录") {
+        } else if line.starts_with("以下文件下载失败") {
             self.failed = true;
+        } else if self.task.is_none() && line.starts_with("未登录") {
+            self.failed = true;
+            self.failure = Some(FailureReason::LoginRequired);
         }
         if let Some((id, event)) = task_event(line) {
             if let Some(path) = event.strip_prefix("加入下载队列: ") {
@@ -356,11 +359,8 @@ impl BaiduProgress {
 
     fn apply_event(&mut self, event: &str) {
         let value = &mut self.value;
-        if let Some(code) = cleanup::pcs_error_code(event) {
-            self.error_code = Some(code);
-        }
         if event == "----" {
-            self.error_code = None;
+            self.failure = None;
             self.metadata = FileMetadata::default();
             self.cloud_file = None;
             self.saved_path = None;
@@ -396,14 +396,34 @@ impl BaiduProgress {
             value.downloaded = value.total.unwrap_or(value.downloaded);
             value.speed = 0;
         } else if event.contains("重试") {
+            self.failure = transfer_failure(event).or(self.failure);
             value.status = DownloadState::Retrying;
             value.speed = 0;
             self.saved_path = None;
         } else if event.contains("失败") || event.contains("错误") {
+            self.failure = transfer_failure(event).or(self.failure);
             value.status = DownloadState::Failed;
             value.speed = 0;
             self.saved_path = None;
         }
+    }
+}
+
+fn transfer_failure(event: &str) -> Option<FailureReason> {
+    if let Some(code) = cleanup::pcs_error_code(event) {
+        return Some(FailureReason::ProviderError(code));
+    }
+    if event.contains("TLS handshake timeout") {
+        Some(FailureReason::TlsHandshakeTimeout)
+    } else if event.contains("timeout") || event.contains("超时") {
+        Some(FailureReason::Timeout)
+    } else if event.contains("网络错误") {
+        Some(FailureReason::Network)
+    } else if event.contains("校验失败") || event.contains("md5值与服务器记录的不匹配")
+    {
+        Some(FailureReason::ChecksumMismatch)
+    } else {
+        None
     }
 }
 
@@ -438,7 +458,7 @@ impl DownloadTransfer for BaiduTransfer {
             let mut value = self.progress.value;
             if matches!(
                 value.status,
-                DownloadState::Complete | DownloadState::Existing
+                DownloadState::Complete | DownloadState::Existing | DownloadState::Failed
             ) {
                 value.status = DownloadState::Active;
             }
@@ -450,29 +470,25 @@ impl DownloadTransfer for BaiduTransfer {
         }
         let mut value = self.progress.value;
         let exit = self.child.wait().await?;
-        if !exit.success()
+        let failure = if !exit.success()
             || !self.progress.finished
             || self.progress.failed
             || !matches!(
                 value.status,
                 DownloadState::Complete | DownloadState::Existing
-            )
-        {
+            ) {
             value.status = DownloadState::Failed;
-            if let Some(code) = self.progress.error_code {
-                eprintln!(
-                    "Baidu transfer failed for {:?}: Baidu error code {code}",
-                    self.progress.path
-                );
-            } else {
-                eprintln!(
-                    "Baidu transfer failed for {:?}: BaiduPCS-Go did not report success ({exit})",
-                    self.progress.path
-                );
-            }
-        }
+            let reason = self.progress.failure.unwrap_or(FailureReason::NoCompletion);
+            eprintln!(
+                "Baidu transfer failed for {:?}: {reason} ({exit})",
+                self.progress.path
+            );
+            Some(reason)
+        } else {
+            None
+        };
         value.speed = 0;
-        Ok(TransferEvent::Finished(value))
+        Ok(TransferEvent::Finished(value, failure))
     }
 
     async fn stop(&mut self) -> io::Result<()> {

@@ -5,7 +5,13 @@ use crate::{DATABASE, settings::Settings};
 use queue::Queue;
 pub use queue::{QueueAction, QueueError, QueueRequest};
 use serde::Serialize;
-use std::{future::Future, io, path::Path, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    io,
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     sync::{RwLock, mpsc, watch},
     task::JoinHandle,
@@ -58,7 +64,57 @@ pub trait DownloadTransfer: Send + Sync {
 
 pub enum TransferEvent {
     Progress(TransferProgress),
-    Finished(TransferProgress),
+    Finished(TransferProgress, Option<FailureReason>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "code", rename_all = "snake_case")]
+pub enum FailureReason {
+    Timeout,
+    TlsHandshakeTimeout,
+    Network,
+    MissingFile,
+    InvalidResponse,
+    FileChanged,
+    PermissionDenied,
+    ChecksumMismatch,
+    LoginRequired,
+    ProviderError(i32),
+    NoCompletion,
+    Unexpected,
+}
+
+impl std::fmt::Display for FailureReason {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderError(code) => write!(out, "Provider error code {code}"),
+            other => write!(out, "{other:?}"),
+        }
+    }
+}
+
+impl std::error::Error for FailureReason {}
+
+impl From<&io::Error> for FailureReason {
+    fn from(error: &io::Error) -> Self {
+        if let Some(reason) = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<Self>())
+        {
+            return *reason;
+        }
+        match error.kind() {
+            io::ErrorKind::TimedOut => Self::Timeout,
+            io::ErrorKind::InvalidData => Self::InvalidResponse,
+            io::ErrorKind::NotFound => Self::MissingFile,
+            io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::NotConnected => Self::Network,
+            _ => Self::Unexpected,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -88,6 +144,7 @@ pub struct Download {
     pub path: String,
     #[serde(flatten)]
     pub progress: TransferProgress,
+    pub last_failure: Option<FailureReason>,
     #[serde(skip)]
     pub remote_id: String,
 }
@@ -97,9 +154,21 @@ pub struct Snapshot {
     pub phase: &'static str,
     account: String,
     files: Vec<Download>,
+    next_scan: Option<Instant>,
 }
 
 impl Snapshot {
+    pub fn next_check_at(&self) -> Option<u64> {
+        let deadline = self.next_scan?;
+        let now = Instant::now();
+        let wall_clock = SystemTime::now();
+        let next = match deadline.checked_duration_since(now) {
+            Some(delay) => wall_clock.checked_add(delay)?,
+            None => wall_clock.checked_sub(now.duration_since(deadline))?,
+        };
+        Some(next.duration_since(UNIX_EPOCH).ok()?.as_secs())
+    }
+
     pub fn files(&self) -> Vec<Download> {
         let mut files = self.files.clone();
         files.sort_by_key(|file| match file.progress.status {
@@ -114,6 +183,12 @@ impl Snapshot {
     fn file_mut(&mut self, id: &str) -> Option<&mut Download> {
         self.files.iter_mut().find(|file| file.id == id)
     }
+}
+
+async fn schedule_scan(status: &RwLock<Snapshot>, interval: Duration) -> Instant {
+    let at = Instant::now() + interval;
+    status.write().await.next_scan = Some(at);
+    at
 }
 
 pub struct WorkerHandle {
@@ -162,7 +237,7 @@ async fn download<P: DownloadProvider>(
                 continue;
             }
             result = &mut scan => {
-                *next_scan = Instant::now() + queue.interval;
+                *next_scan = schedule_scan(queue.status, queue.interval).await;
                 scan.set(refresh_at(*next_scan));
                 let result = match result {
                     Ok(files) if queue.session.current(&queue.settings.borrow()) => queue.reconcile(files, true).await,
@@ -181,12 +256,18 @@ async fn download<P: DownloadProvider>(
             }
             event = transfer.next() => event?,
         };
-        let (progress, finished) = match event {
-            TransferEvent::Progress(progress) => (progress, false),
-            TransferEvent::Finished(progress) => (progress, true),
+        let (progress, finished, failure) = match event {
+            TransferEvent::Progress(progress) => (progress, false, None),
+            TransferEvent::Finished(progress, failure) => (progress, true, failure),
         };
         if let Some(row) = queue.status.write().await.file_mut(&file.id) {
             row.progress = progress;
+            if finished {
+                row.last_failure = failure.or_else(|| {
+                    (progress.status == DownloadState::Failed)
+                        .then_some(FailureReason::NoCompletion)
+                });
+            }
         }
         if finished {
             if progress.status == DownloadState::Complete {
@@ -216,7 +297,11 @@ async fn run<P: DownloadProvider>(
         let current = settings.borrow_and_update().clone();
         let interval = provider.scan_interval(&current);
         let session = if provider.ready(&current) {
-            status.write().await.phase = "checking";
+            {
+                let mut snapshot = status.write().await;
+                snapshot.phase = "checking";
+                snapshot.next_scan = Some(Instant::now());
+            }
             match provider.connect(&current).await {
                 Ok(session) => Some(session),
                 Err(error) => {
@@ -239,7 +324,7 @@ async fn run<P: DownloadProvider>(
             interval,
             database,
         });
-        let mut next_scan = Instant::now() + interval;
+        let mut next_scan;
         if let Some(queue) = &queue {
             {
                 let mut snapshot = status.write().await;
@@ -252,14 +337,14 @@ async fn run<P: DownloadProvider>(
                 }
             }
             let mut scan_result = queue.scan(&mut requests, false).await;
-            next_scan = Instant::now() + interval;
+            next_scan = schedule_scan(status, interval).await;
             while scan_result.is_ok() && !settings.has_changed().unwrap_or(true) {
                 while let Ok(request) = requests.try_recv() {
                     queue.handle(request, None).await;
                 }
                 if Instant::now() >= next_scan {
                     scan_result = queue.scan(&mut requests, true).await;
-                    next_scan = Instant::now() + interval;
+                    next_scan = schedule_scan(status, interval).await;
                     if scan_result.is_err() {
                         break;
                     }
@@ -284,6 +369,7 @@ async fn run<P: DownloadProvider>(
                     if let Some(row) = status.write().await.file_mut(&file.id) {
                         row.progress.status = DownloadState::Failed;
                         row.progress.speed = 0;
+                        row.last_failure = Some(FailureReason::from(&error));
                     }
                 }
             }
@@ -301,6 +387,8 @@ async fn run<P: DownloadProvider>(
             } else {
                 "idle"
             };
+        } else {
+            next_scan = schedule_scan(status, interval).await;
         }
         let wait = sleep_until(next_scan);
         tokio::pin!(wait);

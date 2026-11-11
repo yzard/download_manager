@@ -1,4 +1,4 @@
-use super::{BaiduTransfer, listing::literal_path, run_cli};
+use super::{BaiduTransfer, FailureReason, listing::literal_path, run_cli};
 use crate::settings::Settings;
 use md5::{Digest, Md5};
 use std::{
@@ -157,15 +157,15 @@ fn parse_cloud_file(output: &str, path: &str) -> io::Result<CloudFile> {
                 "Baidu file is absent",
             ));
         }
-        return Err(io::Error::other(format!(
-            "Baidu metadata request failed with code {code}"
-        )));
+        return Err(io::Error::other(FailureReason::ProviderError(code)));
     }
     if errors.any(|line| line.starts_with("网络错误,")) {
-        return Err(io::Error::new(
-            io::ErrorKind::ConnectionAborted,
-            "Baidu metadata network error",
-        ));
+        let reason = if output.contains("TLS handshake timeout") {
+            FailureReason::TlsHandshakeTimeout
+        } else {
+            FailureReason::Network
+        };
+        return Err(io::Error::new(io::ErrorKind::ConnectionAborted, reason));
     }
     let mut metadata = FileMetadata::default();
     let mut files = output.lines().filter_map(|line| metadata.read_line(line));

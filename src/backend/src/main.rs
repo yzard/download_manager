@@ -79,6 +79,7 @@ struct Status {
     #[serde(flatten)]
     settings: BaiduView,
     phase: &'static str,
+    next_check_at: Option<u64>,
     files: Vec<Download>,
 }
 
@@ -92,6 +93,7 @@ async fn status(State(state): State<AppState>, _session: Session, _body: Bytes) 
             snapshot.phase
         },
         settings,
+        next_check_at: snapshot.next_check_at(),
         files: snapshot.files(),
     })
 }
@@ -521,6 +523,7 @@ fn save_error(error: impl std::fmt::Display) -> AppError {
 struct QueueStatus {
     provider: &'static str,
     phase: &'static str,
+    next_check_at: Option<u64>,
     delete_on_remove: bool,
 }
 
@@ -543,6 +546,7 @@ async fn download_status(
         queues.push(QueueStatus {
             provider,
             phase: snapshot.phase,
+            next_check_at: snapshot.next_check_at(),
             delete_on_remove: (queue.recycle_on_remove)(&settings),
         });
         files.extend(snapshot.files());

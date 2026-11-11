@@ -53,6 +53,7 @@ th > span:first-child, td:not(.filename), td small {
 }
 th > span:first-child { display: block; }
 .filename { overflow-wrap: anywhere; }
+.download-status small { white-space: normal; overflow-wrap: anywhere; }
 .column-resize {
   position: absolute;
   inset: 0 0 0 auto;

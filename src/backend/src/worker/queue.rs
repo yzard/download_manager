@@ -114,7 +114,14 @@ impl<P: DownloadProvider> Queue<'_, P> {
                     (_, Some(row)) if preserve => row.progress,
                     _ => TransferProgress {
                         status: DownloadState::Queued,
-                        downloaded: 0,
+                        downloaded: prior
+                            .filter(|row| {
+                                !matches!(
+                                    row.progress.status,
+                                    DownloadState::Complete | DownloadState::Existing
+                                )
+                            })
+                            .map_or(0, |row| row.progress.downloaded),
                         total: Some(file.size),
                         speed: 0,
                     },
@@ -125,6 +132,7 @@ impl<P: DownloadProvider> Queue<'_, P> {
                     path: file.path,
                     remote_id: file.id,
                     progress,
+                    last_failure: prior.and_then(|row| row.last_failure),
                 })
             })
             .collect();

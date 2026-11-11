@@ -23,6 +23,8 @@ The scheduler uses provider, account, remote ID, and path to identify a task. A 
 - Resume a paused task by clearing its saved disposition and putting it back in the queue. Reuse local progress when the provider supports resume.
 - Remove a task by saving a removal disposition. Exclude that identity from later scans and after a service restart. Keep its local files, including partial data.
 - Reconcile the queue after each successful scan. If a cloud file disappeared, remove its task even if it is paused, failed, or complete. Stop its transfer if it was active. Continue scanning during long transfers.
+- Keep the last byte count while the task waits for a retry. Keep the last failure reason until another attempt succeeds or reports a different failure. Use a structured failure reason. Keep raw provider output out of the API.
+- Show the next scan time for a waiting task. A retry requires a successful full scan and an available transfer slot. Keep the current round free to finish its other tasks.
 - Keep the prior queue on a failed scan. Do not interpret a connection problem as a cloud deletion. On an account or scope change, prevent stale tasks from mutating the new cloud scope.
 
 ## Cloud recycling

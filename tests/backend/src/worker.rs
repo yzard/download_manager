@@ -225,3 +225,68 @@ async fn one_shared_queue_pauses_resumes_and_reconciles_external_removals() {
     assert_eq!(cloud.0.lock().unwrap().files, [("/c", 30)]);
     worker.abort();
 }
+
+#[tokio::test]
+async fn retry_keeps_the_last_progress_and_error_until_the_next_attempt() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("retry.sqlite3");
+    let provider = TestProvider(Arc::new(Mutex::new(TestCloud {
+        files: vec![("/retry", 10)],
+        started: Vec::new(),
+        stopped: Vec::new(),
+        recycled: Vec::new(),
+        list_fails: false,
+        recycle_fails: false,
+    })));
+    let (_sender, settings) = watch::channel(Settings {
+        baidu: Default::default(),
+        general: Default::default(),
+    });
+    let status = RwLock::new(Snapshot::default());
+    let queue = Queue::<TestProvider> {
+        session: &provider,
+        settings: &settings,
+        status: &status,
+        interval: Duration::from_secs(60),
+        database: &database,
+    };
+    queue
+        .reconcile(provider.list().await.unwrap(), false)
+        .await
+        .unwrap();
+    schedule_scan(&status, queue.interval).await;
+    {
+        let mut snapshot = status.write().await;
+        let row = &mut snapshot.files[0];
+        row.progress.status = DownloadState::Failed;
+        row.progress.downloaded = 4;
+        row.last_failure = Some(FailureReason::TlsHandshakeTimeout);
+    }
+    queue
+        .reconcile(provider.list().await.unwrap(), true)
+        .await
+        .unwrap();
+    {
+        let snapshot = status.read().await;
+        let row = &snapshot.files[0];
+        assert_eq!(row.progress.status, DownloadState::Failed);
+        assert_eq!(row.progress.downloaded, 4);
+        assert!(
+            snapshot.next_check_at().unwrap()
+                > SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+        );
+    }
+    queue
+        .reconcile(provider.list().await.unwrap(), false)
+        .await
+        .unwrap();
+    let snapshot = status.read().await;
+    let row = &snapshot.files[0];
+    assert_eq!(row.progress.status, DownloadState::Queued);
+    assert_eq!(row.progress.downloaded, 4);
+    assert_eq!(row.progress.total, Some(10));
+    assert_eq!(row.last_failure, Some(FailureReason::TlsHandshakeTimeout));
+}

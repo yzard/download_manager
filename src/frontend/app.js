@@ -287,6 +287,33 @@ function labelAction(button, label) {
   button.setAttribute("aria-label", button.title);
 }
 
+function showStatusDetail(cell, message) {
+  const detail = document.createElement("small");
+  detail.textContent = message;
+  cell.append(detail);
+}
+
+function renderRetryDetails(cell, file, queue) {
+  if (file.status === "failed") {
+    if (queue?.phase === "checking") {
+      showStatusDetail(cell, text("retryChecking"));
+    } else if (Number.isFinite(queue?.next_check_at)) {
+      const deadline = new Date(queue.next_check_at * 1000);
+      const time = deadline.toDateString() === new Date().toDateString()
+        ? deadline.toLocaleTimeString(language)
+        : deadline.toLocaleString(language);
+      const label = queue.phase === "downloading" ? "retryAfterRound" : "retryAt";
+      showStatusDetail(cell, text(label).replace("{time}", () => time));
+    }
+  }
+  if (file.last_failure) {
+    const failure = file.last_failure;
+    const label = text("failure_" + failure.kind) || text("failure_unexpected");
+    const reason = label.replace("{code}", () => String(failure.code));
+    showStatusDetail(cell, text("lastFailure").replace("{reason}", () => reason));
+  }
+}
+
 function renderFile(file, row = document.createElement("tr")) {
   if (!row.cells.length) {
     for (let index = 0; index < 7; index++) row.insertCell();
@@ -307,8 +334,9 @@ function renderFile(file, row = document.createElement("tr")) {
   const active = file.status === "active" || file.status === "retrying";
   const paused = file.status === "paused";
   const complete = file.status === "complete" || file.status === "existing";
+  const savedProgress = file.downloaded > 0 && (paused || file.status === "failed" || file.status === "queued");
   progress.replaceChildren();
-  if (active || complete || (paused && file.downloaded > 0)) {
+  if (active || complete || savedProgress) {
     const percent = complete ? 100 : (file.total > 0 ? Math.min(100, 100 * file.downloaded / file.total) : null);
     const bar = document.createElement("progress");
     bar.max = 100;
@@ -317,7 +345,7 @@ function renderFile(file, row = document.createElement("tr")) {
     const value = document.createElement("span");
     value.textContent = percent === null ? text("preparing") : percent.toFixed(1) + "%";
     progress.append(bar, value);
-    if ((active || paused) && file.total > 0) {
+    if ((active || savedProgress) && file.total > 0) {
       const bytes = document.createElement("small");
       bytes.textContent = formatBytes(file.downloaded) + " / " + formatBytes(file.total);
       progress.append(bytes);
@@ -328,14 +356,16 @@ function renderFile(file, row = document.createElement("tr")) {
 
   speed.textContent = active ? formatBytes(file.speed) + "/s" : "—";
   speed.title = speed.textContent;
+  badge.className = "download-status";
   badge.textContent = text("state_" + file.status) || file.status;
+  const queue = downloadStatus.queues.find((entry) => entry.provider === file.provider);
+  renderRetryDetails(badge, file, queue);
   row.classList.toggle("active", active);
 
   const [pause, remove] = actions.children;
   pause.hidden = complete;
   pause.dataset.action = paused ? "resume" : "pause";
   labelAction(pause, paused ? "resumeDownload" : "pauseDownload");
-  const queue = downloadStatus.queues.find((entry) => entry.provider === file.provider);
   labelAction(remove, queue?.delete_on_remove ? "removeAndRecycle" : "removeDownload");
   for (const button of actions.children) button.disabled = pendingActions.has(file.id);
   return row;
