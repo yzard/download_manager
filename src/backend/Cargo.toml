@@ -15,6 +15,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "process", "signal", "sync", "time"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 md-5 = "0.10.6"
+unicode-width = "0.2"
 
 [profile.release]
 strip = true

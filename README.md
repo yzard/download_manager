@@ -83,7 +83,7 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 
 在局域网浏览器打开 `http://192.168.1.10:8085`。将示例地址替换为你的 NAS 地址，并把相同的主机和端口填入 `WEB_ALLOWED_HOSTS`。多个地址用逗号分隔。按网页提示创建账号或登录。
 
-网页使用 `/api/v1/auth/` 和 `/api/v1/baidu/` 下的 POST 接口。浏览器会话需要同源请求。
+网页使用 POST 接口。登录、下载队列和百度设置分别位于 `/api/v1/auth/`、`/api/v1/downloads/` 和 `/api/v1/baidu/` 下。浏览器会话需要同源请求。
 
 让 Caddy 终止 TLS 并负责 HTTP 跳转。Download Manager 在容器里使用 HTTP。同时设置 `WEB_HTTPS_HOST` 和 `WEB_TRUSTED_PROXY`。前者是浏览器访问的域名，后者是 Caddy 连接到容器时的源 IP。Caddy 保留 Host，并转发 `X-Forwarded-Proto: https`。应用只接受来自这个代理的 HTTPS 转发请求，并发送 Secure Cookie。
 
@@ -99,6 +99,8 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 @downloadManager path /download-manager /download-manager/*
 reverse_proxy @downloadManager download_manager:8080
 ```
+
+使用 Caddy Full 的 Docker 标签时，设置 `caddy.0.domain`、`caddy.0.port=8080` 和 `caddy.0.paths=download-manager:8080`。标签里的路径要与 `BASE_URL` 一致。Caddy 转发时保留这个前缀。
 
 打开同一站点下的 `/download-manager/`。同源页面也可以用 iframe 嵌入这个路径。API 和 Cookie 都使用同一个前缀。更改路径后，在新地址登录一次。
 
@@ -119,10 +121,10 @@ reverse_proxy @downloadManager download_manager:8080
 
 获取百度 Token 时，先在电脑浏览器登录 [百度网盘](https://pan.baidu.com/)。在 Chrome 或 Edge 中按 `F12`，打开“应用程序 → Cookie → https://pan.baidu.com”，复制 `BDUSS` 和 `STOKEN` 的完整值。`STOKEN` 的名称为大写。[BaiduPCS-Go 登录说明](https://github.com/qjfoidnh/BaiduPCS-Go#登录百度帐号)
 
-非会员用户将下载并发设为 1。设置由 BaiduPCS-Go 保存在 `/config/pcs_config.json` 中。
+Download Manager 每次下载一个文件。非会员用户可以把单个文件的下载线程数设为 1。这个设置由 BaiduPCS-Go 保存在 `/config/pcs_config.json` 中。
 
 ```sh
-docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps download_manager config set -max_parallel 1 -max_download_load 1
+docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps download_manager config set -max_parallel 1
 ```
 
 ## 自动下载和续传
@@ -133,12 +135,16 @@ docker compose -f /data/docker/4_torrent.yaml run --rm --no-deps download_manage
 
 监控 `/NAS下载` 并保存到 `/downloads` 时，文件落在 NAS 的 `/data/downloads/baidu/NAS下载` 中。保存到 `/downloads/archive` 时，文件落在 `/data/downloads/baidu/archive/NAS下载` 中。
 
-已经下载的同名文件会跳过，中断后会尝试续传未完成的文件。同名文件内容变更时需要手动处理旧文件。下载速度受百度非会员限制。进度页面每秒更新，逐行标注百度来源、进度条和速度。拖动表头右侧的分隔线可调整列宽。浏览器会保留调整后的宽度。
+已经下载的同名文件会跳过，中断后会尝试续传未完成的文件。同名文件内容变更时需要手动处理旧文件。下载速度受百度非会员限制。服务先扫描整个监控目录，再逐个下载。进度页面每秒更新，排队中的文件也会显示大小。拖动表头右侧的分隔线可调整列宽。浏览器会保留调整后的宽度。
 
 ```sh
 docker compose -f /data/docker/4_torrent.yaml logs -f download_manager
 docker compose -f /data/docker/4_torrent.yaml stop download_manager
 ```
+
+状态列右边有暂停、继续和移除按钮。暂停会保留已下载的部分，继续时尝试续传。点击叉号会移除任务。暂停和移除在服务重启后仍然生效。
+
+百度设置中的「移除任务时也删除云端原文件」默认关闭。开启后，点击叉号会把云端原文件移到回收站，即使下载尚未完成。若百度未确认操作，任务会保持暂停，方便重试。服务确认云端文件已不存在时，也会移除对应任务。
 
 如果页面提示百度登录失败，使用齿轮重新填写 Token。
 

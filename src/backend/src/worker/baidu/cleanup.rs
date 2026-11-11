@@ -1,4 +1,4 @@
-use super::{CLI, Download};
+use super::{BaiduTransfer, listing::literal_path, run_cli};
 use crate::settings::Settings;
 use md5::{Digest, Md5};
 use std::{
@@ -6,20 +6,18 @@ use std::{
     io,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    process::{Output, Stdio},
-    time::Duration,
 };
-use tokio::{process::Command, sync::watch, time::timeout};
+use tokio::sync::watch;
 
-const RESUME_SUFFIX: &str = ".BaiduPCS-Go-downloading";
+pub(super) const RESUME_SUFFIX: &str = ".BaiduPCS-Go-downloading";
 const RECYCLE_SUCCESS: &str = "操作成功, 以下文件/目录已删除, 可在网盘文件回收站找回:";
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct CloudFile {
     pub(super) path: String,
-    size: u64,
-    md5: String,
-    fs_id: u64,
+    pub(super) size: u64,
+    md5: Option<String>,
+    pub(super) fs_id: u64,
 }
 
 #[derive(Default)]
@@ -56,7 +54,7 @@ impl FileMetadata {
                 return Some(CloudFile {
                     path: file.path?,
                     size: file.size?,
-                    md5: file.md5?,
+                    md5: file.md5,
                     fs_id: fs_id.parse::<u64>().ok().filter(|id| *id != 0)?,
                 });
             }
@@ -70,16 +68,8 @@ fn table_value<'a>(line: &'a str, label: &str) -> Option<&'a str> {
     value.starts_with(char::is_whitespace).then(|| value.trim())
 }
 
-fn expected_path(destination: &str, monitor: &str, remote: &str) -> Option<PathBuf> {
-    if remote.contains(['*', '?', '[', ']', '\\'])
-        || remote.chars().any(char::is_control)
-        || !remote
-            .strip_prefix('/')?
-            .split('/')
-            .all(|part| !matches!(part, "" | "." | ".."))
-    {
-        return None;
-    }
+pub(super) fn expected_path(destination: &str, monitor: &str, remote: &str) -> Option<PathBuf> {
+    literal_path(remote)?;
     let monitor = Path::new(monitor);
     let relative = Path::new(remote).strip_prefix(monitor).ok()?;
     if relative.as_os_str().is_empty() {
@@ -150,16 +140,39 @@ fn verify_local(path: &Path, size: u64, expected_md5: &str) -> io::Result<Metada
     Ok(before)
 }
 
-async fn run_cli(action: &str, path: &str) -> io::Result<Output> {
-    timeout(
-        Duration::from_secs(30),
-        Command::new(CLI)
-            .args([action, path])
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await?
+pub(super) async fn cloud_file(path: &str) -> io::Result<CloudFile> {
+    let literal = literal_path(path).ok_or_else(|| io::Error::other("Invalid Baidu file path"))?;
+    let output = run_cli(&["meta", &literal]).await?;
+    if output
+        .lines()
+        .any(|line| line.ends_with("代码: 31066, 消息: 文件或目录不存在"))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Baidu file is absent",
+        ));
+    }
+    let mut metadata = FileMetadata::default();
+    let mut files = output.lines().filter_map(|line| metadata.read_line(line));
+    let file = files
+        .next()
+        .filter(|file| file.path == path && files.next().is_none())
+        .ok_or_else(|| io::Error::other("Baidu file identity could not be verified"))?;
+    Ok(file)
+}
+
+pub(super) async fn move_to_recycle_bin(path: &str) -> io::Result<()> {
+    let literal = literal_path(path).ok_or_else(|| io::Error::other("Invalid Baidu file path"))?;
+    let output = run_cli(&["rm", &literal]).await?;
+    if !output
+        .lines()
+        .any(|line| line.trim_end() == RECYCLE_SUCCESS)
+    {
+        return Err(io::Error::other(
+            "Baidu did not confirm that the file moved to the recycle bin",
+        ));
+    }
+    Ok(())
 }
 
 fn cleanup_enabled(current: &Settings, latest: &Settings) -> bool {
@@ -170,40 +183,37 @@ fn cleanup_enabled(current: &Settings, latest: &Settings) -> bool {
         && latest.general.download_directory == current.general.download_directory
 }
 
-async fn recycle_file(
-    file: Download,
+pub(super) async fn recycle_file(
+    transfer: &BaiduTransfer,
     current: &Settings,
     settings: &watch::Receiver<Settings>,
 ) -> io::Result<bool> {
-    let cloud = file
+    let cloud = transfer
+        .progress
         .cloud_file
+        .clone()
         .ok_or_else(|| io::Error::other("Missing Baidu file metadata"))?;
     let path = expected_path(
         &current.general.download_directory,
         &current.baidu.monitor_directory,
         &cloud.path,
     )
-    .filter(|path| path.to_str() == file.saved_path.as_deref())
+    .filter(|path| path.to_str() == transfer.progress.saved_path.as_deref())
     .ok_or_else(|| io::Error::other("Download path does not match the Baidu file path"))?;
     let before = tokio::task::spawn_blocking({
         let path = path.clone();
-        let md5 = cloud.md5.clone();
+        let md5 = cloud
+            .md5
+            .clone()
+            .ok_or_else(|| io::Error::other("Missing Baidu checksum"))?;
         let size = cloud.size;
         move || verify_local(&path, size, &md5)
     })
     .await
     .map_err(io::Error::other)??;
 
-    let output = run_cli("meta", &cloud.path).await?;
-    let mut metadata = FileMetadata::default();
-    let mut files = std::str::from_utf8(&output.stdout)
-        .map_err(io::Error::other)?
-        .lines()
-        .filter_map(|line| metadata.read_line(line));
-    if !output.status.success() || files.next().as_ref() != Some(&cloud) || files.next().is_some() {
-        return Err(io::Error::other(
-            "Baidu file changed or its identity could not be verified",
-        ));
+    if cloud_file(&cloud.path).await? != cloud {
+        return Err(io::Error::other("Baidu file changed before recycling"));
     }
     let after = tokio::task::spawn_blocking(move || file_metadata(&path))
         .await
@@ -214,37 +224,10 @@ async fn recycle_file(
     if !cleanup_enabled(current, &settings.borrow()) {
         return Ok(false);
     }
-    let output = run_cli("rm", &cloud.path).await?;
-    if !output.status.success()
-        || !String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.trim_end() == RECYCLE_SUCCESS)
-    {
-        return Err(io::Error::other(
-            "Baidu did not confirm that the file moved to the recycle bin",
-        ));
-    }
+    move_to_recycle_bin(&cloud.path).await?;
     Ok(true)
 }
 
-pub(super) async fn recycle_completed(
-    candidates: Vec<Download>,
-    current: &Settings,
-    settings: &watch::Receiver<Settings>,
-) {
-    for file in candidates {
-        if !cleanup_enabled(current, &settings.borrow()) {
-            return;
-        }
-        let path = file.path.clone();
-        match recycle_file(file, current, settings).await {
-            Ok(true) => eprintln!("Baidu moved {path:?} to the recycle bin"),
-            Ok(false) => return,
-            Err(error) => eprintln!("Baidu recycle request did not complete for {path:?}: {error}"),
-        }
-    }
-}
-
 #[cfg(test)]
-#[path = "../../../../tests/backend/src/worker/cleanup.rs"]
+#[path = "../../../../../tests/backend/src/worker/baidu/cleanup.rs"]
 mod tests;

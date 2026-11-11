@@ -1,359 +1,332 @@
-mod cleanup;
+pub mod baidu;
+mod queue;
 
-use crate::settings::{BaiduSettings, GeneralSettings, Settings, save_private};
-use cleanup::{CloudFile, FileMetadata};
+use crate::{DATABASE, settings::Settings};
+use queue::Queue;
+pub use queue::{QueueAction, QueueError, QueueRequest};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io, path::Path, process::Stdio, time::Duration};
+use std::{future::Future, io, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    io::AsyncReadExt,
-    process::Command,
-    sync::{RwLock, watch},
+    sync::{RwLock, mpsc, watch},
+    task::JoinHandle,
+    time::{Instant, sleep_until},
 };
 
-const CLI: &str = "/usr/local/bin/BaiduPCS-Go";
-const LOGIN_HASH: &str = "/config/.login-hash";
-
-#[derive(Clone, Serialize)]
-pub struct Download {
-    pub id: u64,
+pub struct RemoteFile {
+    pub id: String,
     pub path: String,
-    pub status: &'static str,
+    pub size: u64,
+}
+
+pub trait DownloadProvider: Send + Sync + 'static {
+    const ID: &'static str;
+    type Session: DownloadSession;
+
+    fn ready(&self, settings: &Settings) -> bool;
+    fn scan_interval(&self, settings: &Settings) -> Duration;
+    fn recycle_on_remove(settings: &Settings) -> bool;
+    fn connect(
+        &self,
+        settings: &Settings,
+    ) -> impl Future<Output = io::Result<Self::Session>> + Send;
+}
+
+pub trait DownloadSession: Send + Sync {
+    type Transfer: DownloadTransfer;
+
+    fn account(&self) -> &str;
+    fn current(&self, settings: &Settings) -> bool;
+    fn contains(&self, path: &str) -> bool;
+    fn list(&self) -> impl Future<Output = io::Result<Vec<RemoteFile>>> + Send;
+    fn start(&self, file: &Download) -> impl Future<Output = io::Result<Self::Transfer>> + Send;
+    fn recycle(
+        &self,
+        file: &Download,
+        settings: &watch::Receiver<Settings>,
+    ) -> impl Future<Output = io::Result<()>> + Send;
+    fn after_complete(
+        &self,
+        transfer: &Self::Transfer,
+        settings: &watch::Receiver<Settings>,
+    ) -> impl Future<Output = io::Result<bool>> + Send;
+}
+
+pub trait DownloadTransfer: Send + Sync {
+    fn next(&mut self) -> impl Future<Output = io::Result<TransferEvent>> + Send;
+    fn stop(&mut self) -> impl Future<Output = io::Result<()>> + Send;
+}
+
+pub enum TransferEvent {
+    Progress(TransferProgress),
+    Finished(TransferProgress),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    Queued,
+    Active,
+    Retrying,
+    Paused,
+    Complete,
+    Existing,
+    Failed,
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub struct TransferProgress {
+    pub status: DownloadState,
     pub downloaded: u64,
     pub total: Option<u64>,
     pub speed: u64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct Download {
+    pub id: String,
+    pub provider: &'static str,
+    pub path: String,
+    #[serde(flatten)]
+    pub progress: TransferProgress,
     #[serde(skip)]
-    cloud_file: Option<CloudFile>,
-    #[serde(skip)]
-    saved_path: Option<String>,
+    pub remote_id: String,
 }
 
 #[derive(Default)]
 pub struct Snapshot {
     pub phase: &'static str,
-    files: BTreeMap<u64, Download>,
-    metadata_task: Option<u64>,
-    metadata: FileMetadata,
-    queue_ready: bool,
-    round_finished: bool,
+    account: String,
+    files: Vec<Download>,
 }
 
 impl Snapshot {
     pub fn files(&self) -> Vec<Download> {
-        if !self.queue_ready {
-            return Vec::new();
-        }
-        let mut files: Vec<_> = self.files.values().cloned().collect();
-        files.sort_by_key(|file| match file.status {
-            "active" | "retrying" => 0,
-            "queued" => 1,
-            _ => 2,
+        let mut files = self.files.clone();
+        files.sort_by_key(|file| match file.progress.status {
+            DownloadState::Active | DownloadState::Retrying => 0,
+            DownloadState::Queued => 1,
+            DownloadState::Paused => 2,
+            _ => 3,
         });
         files
     }
 
-    fn apply_line(&mut self, line: &str) {
-        if line.starts_with("下载结束, 时间:") {
-            self.round_finished = true;
-        }
-        if line.contains("Baidu login failed") || line.contains("未登录") {
-            self.phase = "login_failed";
-        } else if line.contains("以下文件下载失败") || line.contains("文件或目录不存在")
-        {
-            self.phase = "download_failed";
-        }
-
-        if let Some((id, event)) = task_event(line) {
-            self.apply_event(id, event);
-            return;
-        }
-
-        if let Some(id) = self.metadata_task
-            && let Some(cloud_file) = self.metadata.read_line(line)
-            && let Some(file) = self.files.get_mut(&id)
-            && file.path == cloud_file.path
-        {
-            file.cloud_file = Some(cloud_file);
-        }
-
-        let mut cells = line
-            .split(|c: char| c.is_whitespace() || matches!(c, '|' | '│'))
-            .filter(|cell| !cell.is_empty());
-        let first_cell = cells.next();
-        if first_cell == Some("类型") && cells.next() == Some("目录") {
-            if let Some(id) = self.metadata_task {
-                self.files.remove(&id);
-            }
-        } else if first_cell == Some("文件大小")
-            && let Some(total) = cells
-                .next()
-                .and_then(|cell| cell.trim_end_matches(',').parse().ok())
-            && let Some(file) = self.metadata_task.and_then(|id| self.files.get_mut(&id))
-        {
-            file.total = Some(total);
-            if total == 0 {
-                file.status = "complete";
-            }
-        }
-    }
-
-    fn apply_event(&mut self, id: u64, event: &str) {
-        if let Some(path) = event.strip_prefix("加入下载队列: ") {
-            self.files.insert(
-                id,
-                Download {
-                    id,
-                    path: path.to_owned(),
-                    status: "queued",
-                    downloaded: 0,
-                    total: None,
-                    speed: 0,
-                    cloud_file: None,
-                    saved_path: None,
-                },
-            );
-            return;
-        }
-        if event == "----" {
-            self.metadata_task = Some(id);
-            self.metadata = FileMetadata::default();
-            if let Some(file) = self.files.get_mut(&id) {
-                file.cloud_file = None;
-                file.saved_path = None;
-            }
-            return;
-        }
-        if event.starts_with("准备下载: ") {
-            self.queue_ready = true;
-            if self.phase != "download_failed" {
-                self.phase = "downloading";
-            }
-        }
-        let Some(file) = self.files.get_mut(&id) else {
-            return;
-        };
-        if let Some(path) = event.strip_prefix("准备下载: ") {
-            file.status = "active";
-            file.speed = 0;
-            file.saved_path = None;
-            if file.path != path {
-                file.cloud_file = None;
-            }
-        } else if let Some(progress) = event.strip_prefix("↓ ") {
-            let mut fields = progress.split_whitespace();
-            if let Some((done, total)) = fields.next().and_then(|field| field.split_once('/'))
-                && let (Some(done), Some(total)) = (human_bytes(done), human_bytes(total))
-            {
-                file.downloaded = done;
-                file.total.get_or_insert(total);
-            }
-            file.speed = fields
-                .next()
-                .and_then(|field| field.strip_suffix("/s"))
-                .and_then(human_bytes)
-                .unwrap_or(0);
-        } else if event.starts_with("下载完成, 保存位置:") || event.starts_with("文件已经存在:")
-        {
-            if file.status == "active" {
-                file.saved_path = event
-                    .strip_prefix("下载完成, 保存位置: ")
-                    .map(str::to_owned);
-            }
-            file.status = if event.starts_with("文件已经存在:") {
-                "existing"
-            } else {
-                "complete"
-            };
-            file.downloaded = file.total.unwrap_or(file.downloaded);
-            file.speed = 0;
-        } else if event.contains("重试") {
-            file.status = "retrying";
-            file.speed = 0;
-            file.saved_path = None;
-        } else if event.contains("失败") || event.contains("错误") {
-            file.status = "failed";
-            file.speed = 0;
-            file.saved_path = None;
-            self.phase = "download_failed";
-        }
+    fn file_mut(&mut self, id: &str) -> Option<&mut Download> {
+        self.files.iter_mut().find(|file| file.id == id)
     }
 }
 
-fn task_event(line: &str) -> Option<(u64, &str)> {
-    let (id, event) = line.strip_prefix('[')?.split_once("] ")?;
-    Some((id.parse().ok()?, event))
+pub struct WorkerHandle {
+    pub status: Arc<RwLock<Snapshot>>,
+    pub requests: mpsc::Sender<QueueRequest>,
+    pub recycle_on_remove: fn(&Settings) -> bool,
 }
 
-fn human_bytes(value: &str) -> Option<u64> {
-    let split = value.find(|c: char| c.is_ascii_alphabetic())?;
-    let number: f64 = value[..split].parse().ok()?;
-    let power = match &value[split..] {
-        "B" => 0,
-        "KB" => 1,
-        "MB" => 2,
-        "GB" => 3,
-        "TB" => 4,
-        "PB" => 5,
-        _ => return None,
+pub fn spawn<P: DownloadProvider>(
+    provider: P,
+    settings: watch::Receiver<Settings>,
+) -> (WorkerHandle, JoinHandle<()>) {
+    let (sender, receiver) = mpsc::channel(16);
+    let status = Arc::new(RwLock::new(Snapshot::default()));
+    let handle = WorkerHandle {
+        status: status.clone(),
+        requests: sender,
+        recycle_on_remove: P::recycle_on_remove,
     };
-    Some((number * 1024_f64.powi(power)).round() as u64)
+    let worker = tokio::spawn(async move {
+        run(provider, settings, &status, receiver, Path::new(DATABASE)).await
+    });
+    (handle, worker)
 }
 
-async fn login(settings: &BaiduSettings) -> io::Result<bool> {
-    let mut hash = Sha256::new();
-    hash.update(settings.bduss.as_bytes());
-    hash.update(b"\n");
-    hash.update(settings.stoken.as_bytes());
-    let fingerprint = format!("{:x}", hash.finalize());
-    let cached = tokio::task::spawn_blocking({
-        let fingerprint = fingerprint.clone();
-        move || {
-            Path::new("/config/pcs_config.json").is_file()
-                && fs::read_to_string(LOGIN_HASH).is_ok_and(|saved| saved.trim_end() == fingerprint)
-        }
-    })
-    .await
-    .map_err(io::Error::other)?;
-    if cached {
-        return Ok(true);
-    }
-    let output = Command::new(CLI)
-        .arg("login")
-        .arg(format!("-bduss={}", settings.bduss))
-        .arg(format!("-stoken={}", settings.stoken))
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !output.status.success()
-        || !String::from_utf8_lossy(&output.stdout).contains("百度帐号登录成功:")
-    {
-        return Ok(false);
-    }
-    tokio::task::spawn_blocking(move || {
-        save_private(Path::new(LOGIN_HASH), fingerprint.as_bytes())
-    })
-    .await
-    .map_err(io::Error::other)??;
-    Ok(true)
-}
-
-async fn download(
-    baidu: &BaiduSettings,
-    general: &GeneralSettings,
-    status: &RwLock<Snapshot>,
-) -> io::Result<bool> {
-    let destination = general.clone();
-    tokio::task::spawn_blocking(move || destination.prepare_destination())
-        .await
-        .map_err(io::Error::other)??;
-    if !login(baidu).await? {
-        status.write().await.phase = "login_failed";
-        return Ok(false);
-    }
-    let mut child = Command::new("/bin/busybox")
-        .args([
-            "sh",
-            "-c",
-            "exec /usr/local/bin/BaiduPCS-Go \"$@\" 2>&1",
-            CLI,
-            "download",
-            "--saveto",
-            &general.download_directory,
-            &baidu.monitor_directory,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("Missing CLI output"))?;
-    let mut chunk = [0; 8192];
-    let mut line = Vec::new();
-    let mut oversized = false;
+async fn download<P: DownloadProvider>(
+    file: &Download,
+    queue: &Queue<'_, P>,
+    requests: &mut mpsc::Receiver<QueueRequest>,
+    next_scan: &mut Instant,
+) -> io::Result<()> {
+    let mut transfer = queue.session.start(file).await?;
+    let refresh_at = |deadline| async move {
+        sleep_until(deadline).await;
+        queue.session.list().await
+    };
+    let scan = refresh_at(*next_scan);
+    tokio::pin!(scan);
     loop {
-        let count = stdout.read(&mut chunk).await?;
-        if count == 0 {
-            if !line.is_empty() && !oversized {
-                status
-                    .write()
-                    .await
-                    .apply_line(&String::from_utf8_lossy(&line));
-            }
-            break;
-        }
-        let mut status = status.write().await;
-        for &byte in &chunk[..count] {
-            if matches!(byte, b'\r' | b'\n') {
-                if !line.is_empty() && !oversized {
-                    status.apply_line(&String::from_utf8_lossy(&line));
+        let event = tokio::select! {
+            request = requests.recv() => {
+                let Some(request) = request else { return Ok(()); };
+                if queue.handle(request, Some((&file.id, &mut transfer))).await {
+                    return Ok(());
                 }
-                line.clear();
-                oversized = false;
-            } else if line.len() < 65536 {
-                line.push(byte);
-            } else {
-                oversized = true;
+                continue;
             }
+            result = &mut scan => {
+                *next_scan = Instant::now() + queue.interval;
+                scan.set(refresh_at(*next_scan));
+                let result = match result {
+                    Ok(files) if queue.session.current(&queue.settings.borrow()) => queue.reconcile(files, true).await,
+                    Ok(_) => continue,
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(()) if !queue.status.read().await.files.iter().any(|row| row.id == file.id) => {
+                        transfer.stop().await?;
+                        return Ok(());
+                    }
+                    Ok(()) => {}
+                    Err(error) => eprintln!("{} queue refresh failed: {error}", P::ID),
+                }
+                continue;
+            }
+            event = transfer.next() => event?,
+        };
+        let (progress, finished) = match event {
+            TransferEvent::Progress(progress) => (progress, false),
+            TransferEvent::Finished(progress) => (progress, true),
+        };
+        if let Some(row) = queue.status.write().await.file_mut(&file.id) {
+            row.progress = progress;
+        }
+        if finished {
+            if progress.status == DownloadState::Complete {
+                match queue
+                    .session
+                    .after_complete(&transfer, queue.settings)
+                    .await
+                {
+                    Ok(true) => eprintln!("{} moved {:?} to the recycle bin", P::ID, file.path),
+                    Ok(false) => {}
+                    Err(error) => eprintln!("{} could not recycle {:?}: {error}", P::ID, file.path),
+                }
+            }
+            return Ok(());
         }
     }
-    Ok(child.wait().await?.success())
 }
 
-pub async fn run(mut settings: watch::Receiver<Settings>, status: &RwLock<Snapshot>) {
+async fn run<P: DownloadProvider>(
+    provider: P,
+    mut settings: watch::Receiver<Settings>,
+    status: &RwLock<Snapshot>,
+    mut requests: mpsc::Receiver<QueueRequest>,
+    database: &Path,
+) {
     loop {
         let current = settings.borrow_and_update().clone();
-        if current.baidu.ready() {
-            *status.write().await = Snapshot {
-                phase: "checking",
-                ..Snapshot::default()
-            };
-            let result = match download(&current.baidu, &current.general, status).await {
-                Ok(completed) => completed,
+        let interval = provider.scan_interval(&current);
+        let session = if provider.ready(&current) {
+            status.write().await.phase = "checking";
+            match provider.connect(&current).await {
+                Ok(session) => Some(session),
                 Err(error) => {
-                    eprintln!("Baidu download check failed: {error}");
-                    false
-                }
-            };
-            if result && current.baidu.delete_after_download {
-                let candidates = {
-                    let snapshot = status.read().await;
-                    snapshot.round_finished.then(|| {
-                        snapshot
-                            .files
-                            .values()
-                            .filter(|file| file.status == "complete")
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    })
-                };
-                if let Some(candidates) = candidates {
-                    cleanup::recycle_completed(candidates, &current, &settings).await;
+                    eprintln!("{} connection failed: {error}", P::ID);
+                    status.write().await.phase = "login_failed";
+                    None
                 }
             }
-            let mut snapshot = status.write().await;
-            snapshot.queue_ready = true;
-            for file in snapshot.files.values_mut() {
-                if matches!(file.status, "queued" | "active" | "retrying") {
-                    file.status = "failed";
-                    file.speed = 0;
-                }
-            }
-            if !matches!(snapshot.phase, "login_failed" | "download_failed") {
-                snapshot.phase = if result { "idle" } else { "download_failed" };
-            }
-            eprintln!("Download check finished: {}", snapshot.phase);
         } else {
             *status.write().await = Snapshot {
                 phase: "setup",
                 ..Snapshot::default()
             };
+            None
+        };
+        let queue = session.as_ref().map(|session| Queue::<P> {
+            session,
+            settings: &settings,
+            status,
+            interval,
+            database,
+        });
+        let mut next_scan = Instant::now() + interval;
+        if let Some(queue) = &queue {
+            {
+                let mut snapshot = status.write().await;
+                if snapshot.account != queue.session.account() {
+                    snapshot.files.clear();
+                } else {
+                    snapshot
+                        .files
+                        .retain(|file| queue.session.contains(&file.path));
+                }
+            }
+            let mut scan_result = queue.scan(&mut requests, false).await;
+            next_scan = Instant::now() + interval;
+            while scan_result.is_ok() && !settings.has_changed().unwrap_or(true) {
+                while let Ok(request) = requests.try_recv() {
+                    queue.handle(request, None).await;
+                }
+                if Instant::now() >= next_scan {
+                    scan_result = queue.scan(&mut requests, true).await;
+                    next_scan = Instant::now() + interval;
+                    if scan_result.is_err() {
+                        break;
+                    }
+                }
+                let file = {
+                    let mut snapshot = status.write().await;
+                    snapshot
+                        .files
+                        .iter_mut()
+                        .find(|file| file.progress.status == DownloadState::Queued)
+                        .map(|file| {
+                            file.progress.status = DownloadState::Active;
+                            file.clone()
+                        })
+                };
+                let Some(file) = file else {
+                    break;
+                };
+                status.write().await.phase = "downloading";
+                if let Err(error) = download(&file, queue, &mut requests, &mut next_scan).await {
+                    eprintln!("{} download failed for {:?}: {error}", P::ID, file.path);
+                    if let Some(row) = status.write().await.file_mut(&file.id) {
+                        row.progress.status = DownloadState::Failed;
+                        row.progress.speed = 0;
+                    }
+                }
+            }
+            let mut snapshot = status.write().await;
+            if let Err(error) = &scan_result {
+                eprintln!("{} queue scan failed: {error}", P::ID);
+            }
+            snapshot.phase = if scan_result.is_err()
+                || snapshot
+                    .files
+                    .iter()
+                    .any(|row| row.progress.status == DownloadState::Failed)
+            {
+                "download_failed"
+            } else {
+                "idle"
+            };
         }
-        tokio::select! {
-            changed = settings.changed() => if changed.is_err() { return },
-            () = tokio::time::sleep(Duration::from_secs(u64::from(current.baidu.check_interval_seconds))) => {},
+        let wait = sleep_until(next_scan);
+        tokio::pin!(wait);
+        loop {
+            // Construct the controller only while processing a command so the watch
+            // receiver can be borrowed mutably for changes while idle.
+            tokio::select! {
+                changed = settings.changed() => {
+                    if changed.is_err() { return; }
+                    break;
+                }
+                () = &mut wait => break,
+                request = requests.recv() => {
+                    let Some(request) = request else { return; };
+                    let resume = request.action == QueueAction::Resume;
+                    if let Some(session) = &session {
+                        let queue = Queue::<P> { session, settings: &settings, status, interval, database };
+                        queue.handle(request, None).await;
+                        if resume && status.read().await.files.iter().any(|file| file.progress.status == DownloadState::Queued) {
+                            break;
+                        }
+                    } else {
+                        let _ = request.reply.send(Err(QueueError::Unavailable));
+                    }
+                }
+            }
         }
     }
 }

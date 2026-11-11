@@ -53,22 +53,27 @@
         </div>
         <p id="service-status" class="status" role="status" data-text="connecting">正在连接</p>
       </div>
+      <p id="queue-error" class="error queue-error" role="alert" hidden></p>
       <div class="table-scroll">
         <table>
           <colgroup>
             <col data-column="source">
             <col data-column="file">
+            <col data-column="size">
             <col data-column="progress">
             <col data-column="speed">
             <col data-column="status">
+            <col data-column="taskActions">
           </colgroup>
           <thead>
             <tr>
               <th scope="col" data-column="source"><span data-text="source">来源</span></th>
               <th scope="col" data-column="file"><span data-text="file">文件</span></th>
+              <th scope="col" data-column="size"><span data-text="size">大小</span></th>
               <th scope="col" data-column="progress"><span data-text="progress">进度</span></th>
               <th scope="col" data-column="speed"><span data-text="speed">速度</span></th>
               <th scope="col" data-column="status"><span data-text="status">状态</span></th>
+              <th scope="col"><span data-text="taskActions">操作</span></th>
             </tr>
           </thead>
           <tbody id="downloads"></tbody>
@@ -106,7 +111,9 @@
         <label><span data-text="monitorDirectory">网盘监控目录</span> <input name="monitor_directory" required spellcheck="false" placeholder="/NAS下载" maxlength="4096"></label>
         <label><span data-text="checkInterval">检查间隔（秒）</span> <input name="check_interval_seconds" type="number" min="1" max="4294967295" step="1" required></label>
         <label class="checkbox-option"><input name="delete_after_download" type="checkbox" aria-describedby="baidu-recycle-help"> <span data-text="deleteAfterDownload">下载完成后删除云端原文件</span></label>
-        <p class="muted" id="baidu-recycle-help" data-text="deleteAfterDownloadHelp">本地文件通过完整性校验后，原文件会移到百度网盘回收站。</p>
+        <p class="muted checkbox-help" id="baidu-recycle-help" data-text="deleteAfterDownloadHelp">本地文件通过完整性校验后，原文件会移到百度网盘回收站。</p>
+        <label class="checkbox-option"><input name="delete_on_remove" type="checkbox" aria-describedby="baidu-remove-help"> <span data-text="deleteOnRemove">移除任务时也删除云端原文件</span></label>
+        <p class="muted checkbox-help" id="baidu-remove-help" data-text="deleteOnRemoveHelp">点击任务旁的叉号时，原文件会移到百度网盘回收站，即使下载尚未完成。</p>
         <p class="error" role="alert"></p>
         <p class="muted" role="status" hidden data-text="settingsSaved">设置已保存。</p>
         <div class="actions"><button class="primary" type="submit" data-text="saveBaidu">保存百度设置</button></div>

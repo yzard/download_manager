@@ -1,10 +1,11 @@
 pub mod accounts;
+pub mod download_queue;
 
 use crate::settings::{BaiduSettings, GeneralSettings, Language};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 const LOAD_BAIDU: &str = "
 SELECT bduss
@@ -12,6 +13,7 @@ SELECT bduss
      , monitor_directory
      , check_interval_seconds
      , delete_after_download
+     , delete_on_remove
   FROM baidu_settings
  WHERE singleton = 1";
 
@@ -39,15 +41,17 @@ INSERT INTO baidu_settings (
   , monitor_directory
   , check_interval_seconds
   , delete_after_download
+  , delete_on_remove
 )
-VALUES (1, ?1, ?2, ?3, ?4, ?5)
+VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT (singleton) DO UPDATE
 SET bduss = excluded.bduss
   , stoken = excluded.stoken
   , monitor_directory = excluded.monitor_directory
   , check_interval_seconds = excluded.check_interval_seconds
   , delete_after_download = excluded.delete_after_download
-WHERE ?6 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
+  , delete_on_remove = excluded.delete_on_remove
+WHERE ?7 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
 
 fn connect(path: &Path) -> io::Result<Connection> {
     OpenOptions::new()
@@ -70,7 +74,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
         let version = schema_version(&transaction)?;
         match version {
             0 => transaction.execute_batch(include_str!("../schema.sql")),
-            1..=5 => {
+            1..=6 => {
                 for (target, migration) in [
                     (
                         2,
@@ -83,6 +87,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
                         6,
                         include_str!("../migrations/006_baidu_delete_after_download.sql"),
                     ),
+                    (7, include_str!("../migrations/007_download_queue.sql")),
                 ] {
                     if version < target {
                         transaction
@@ -125,6 +130,7 @@ pub fn load_baidu(path: &Path) -> io::Result<BaiduSettings> {
                 monitor_directory: row.get(2)?,
                 check_interval_seconds: row.get(3)?,
                 delete_after_download: row.get(4)?,
+                delete_on_remove: row.get(5)?,
             })
         })
         .optional()
@@ -207,6 +213,7 @@ fn write_baidu(
                 settings.monitor_directory,
                 settings.check_interval_seconds,
                 settings.delete_after_download,
+                settings.delete_on_remove,
                 replace_existing
             ],
         )

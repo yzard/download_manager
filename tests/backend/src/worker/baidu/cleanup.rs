@@ -14,13 +14,7 @@ fn maps_only_exact_descendant_paths() {
         expected_path("/downloads", "/", "/sub/file.txt"),
         Some(PathBuf::from("/downloads/sub/file.txt")),
     );
-    for path in [
-        "/work",
-        "/work-other/a",
-        "/work/../a",
-        "/work/a*",
-        "/work/a\\b",
-    ] {
+    for path in ["/work", "/work-other/a", "/work/../a", "/work/a\\b"] {
         assert!(
             expected_path("/downloads", "/work", path).is_none(),
             "{path}"

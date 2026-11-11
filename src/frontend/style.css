@@ -11,7 +11,7 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; }
-main { max-width: 1050px; margin: 0 auto; padding: 45px 24px; }
+main { max-width: 1280px; margin: 0 auto; padding: 45px 24px; }
 h1, h2, p { margin: 0; }
 h1 { font-size: clamp(26px, 5vw, 36px); letter-spacing: -.025em; }
 h2 { font-size: 19px; }
@@ -25,10 +25,12 @@ h2 { font-size: 19px; }
 table {
   --source-width: 140px;
   --file-width: 315px;
+  --size-width: 110px;
+  --task-actions-width: 104px;
   --progress-width: 225px;
   --speed-width: 135px;
   --status-width: 185px;
-  width: calc(var(--source-width) + var(--file-width) + var(--progress-width) + var(--speed-width) + var(--status-width));
+  width: calc(var(--source-width) + var(--file-width) + var(--size-width) + var(--progress-width) + var(--speed-width) + var(--status-width) + var(--task-actions-width));
   table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
@@ -36,6 +38,8 @@ table {
 }
 col[data-column="source"] { width: var(--source-width); }
 col[data-column="file"] { width: var(--file-width); }
+col[data-column="size"] { width: var(--size-width); }
+col[data-column="taskActions"] { width: var(--task-actions-width); }
 col[data-column="progress"] { width: var(--progress-width); }
 col[data-column="speed"] { width: var(--speed-width); }
 col[data-column="status"] { width: var(--status-width); }
@@ -82,7 +86,12 @@ input, select { display: block; width: 100%; margin-top: 4px; padding: 9px; font
 .settings-section legend { font-weight: 650; padding: 0 6px; }
 .checkbox-option { display: flex; align-items: center; gap: 8px; }
 .checkbox-option input { width: auto; margin: 0; accent-color: var(--accent); }
-#baidu-recycle-help { margin: 4px 0 0 21px; }
+.checkbox-help { margin: 4px 0 0 21px; }
+.queue-error { padding: 0 22px 12px; }
+.task-actions { padding-inline: 12px; }
+.task-actions button { width: 32px; height: 32px; padding: 0; font-size: 18px; line-height: 1; }
+.task-actions button + button { margin-left: 6px; }
+.task-actions button[data-action="remove"]:hover { color: #a62a31; background: #fff0f1; }
 .account-settings { border-top: 1px solid var(--border); padding-top: 12px; }
 .account-settings h3 { font-size: 14px; margin: 0 0 8px; }
 @media (max-width: 580px) {

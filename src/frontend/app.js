@@ -8,6 +8,8 @@ const generalForm = document.querySelector("#general-settings-form");
 const settingsDescription = document.querySelector("#settings-description");
 const settingsButton = document.querySelector("#open-settings");
 const rows = document.querySelector("#downloads");
+const queueError = document.querySelector("#queue-error");
+const pendingActions = new Set();
 const empty = document.querySelector("#empty");
 const status = document.querySelector("#service-status");
 const loginPanel = document.querySelector("#login-panel");
@@ -20,6 +22,7 @@ const passwordForm = document.querySelector("#password-form");
 let language = document.documentElement.lang;
 let general;
 let current;
+let downloadStatus;
 let setupShown = false;
 let session;
 let sessionGeneration = 0;
@@ -76,9 +79,11 @@ function showSession(next, message) {
     passwordDialog.close();
     dialog.close();
     current = undefined;
+    downloadStatus = undefined;
     settingsButton.disabled = true;
     setupShown = false;
     rows.replaceChildren();
+    queueError.hidden = true;
   }
 }
 
@@ -202,6 +207,7 @@ function openSettings() {
   form.elements.monitor_directory.value = current.monitor_directory || "";
   form.elements.check_interval_seconds.value = current.check_interval_seconds;
   form.elements.delete_after_download.checked = current.delete_after_download;
+  form.elements.delete_on_remove.checked = current.delete_on_remove;
   form.elements.bduss.required = !current.has_tokens;
   form.elements.stoken.required = !current.has_tokens;
   showMessage(settingsDescription, current.has_tokens ? "keepTokens" : "enterTokens");
@@ -223,10 +229,14 @@ bindForm(generalForm, async (payload) => {
 bindForm(form, async (payload) => {
   const check_interval_seconds = Number(payload.check_interval_seconds);
   const delete_after_download = form.elements.delete_after_download.checked;
-  await submitJson("/api/v1/baidu/save-settings", {...payload, check_interval_seconds, delete_after_download});
+  const delete_on_remove = form.elements.delete_on_remove.checked;
+  await submitJson("/api/v1/baidu/save-settings", {...payload, check_interval_seconds, delete_after_download, delete_on_remove});
   current.monitor_directory = payload.monitor_directory.trim();
   current.check_interval_seconds = check_interval_seconds;
   current.delete_after_download = delete_after_download;
+  current.delete_on_remove = delete_on_remove;
+  const queue = downloadStatus?.queues.find((entry) => entry.provider === "baidu");
+  if (queue) queue.delete_on_remove = delete_on_remove;
   current.has_tokens = true;
   current.setup_required = false;
   for (const token of [form.elements.bduss, form.elements.stoken]) {
@@ -264,20 +274,41 @@ function formatBytes(value) {
     .format(value) + " " + units[unit];
 }
 
-function renderFile(file, provider) {
-  const row = document.createElement("tr");
-  const source = row.insertCell();
-  source.textContent = provider === "baidu" ? text("baidu") : provider;
+function actionButton(symbol, action) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = symbol;
+  button.dataset.action = action;
+  return button;
+}
+
+function labelAction(button, label) {
+  button.title = text(label);
+  button.setAttribute("aria-label", button.title);
+}
+
+function renderFile(file, row = document.createElement("tr")) {
+  if (!row.cells.length) {
+    for (let index = 0; index < 7; index++) row.insertCell();
+    row.cells[6].className = "task-actions";
+    row.cells[6].append(actionButton("Ⅱ", "pause"), actionButton("×", "remove"));
+  }
+  row.dataset.id = file.id;
+  row.dataset.provider = file.provider;
+  const [source, name, size, progress, speed, badge, actions] = row.cells;
+  source.textContent = text(file.provider) || file.provider;
   source.title = source.textContent;
-  const name = row.insertCell();
   name.textContent = file.path.split("/").pop() || file.path;
   name.title = file.path;
   name.className = "filename";
+  size.textContent = file.total === null ? "—" : formatBytes(file.total);
+  size.title = size.textContent;
 
-  const progress = row.insertCell();
   const active = file.status === "active" || file.status === "retrying";
+  const paused = file.status === "paused";
   const complete = file.status === "complete" || file.status === "existing";
-  if (active || complete) {
+  progress.replaceChildren();
+  if (active || complete || (paused && file.downloaded > 0)) {
     const percent = complete ? 100 : (file.total > 0 ? Math.min(100, 100 * file.downloaded / file.total) : null);
     const bar = document.createElement("progress");
     bar.max = 100;
@@ -286,23 +317,55 @@ function renderFile(file, provider) {
     const value = document.createElement("span");
     value.textContent = percent === null ? text("preparing") : percent.toFixed(1) + "%";
     progress.append(bar, value);
-    if (active && file.total > 0) {
-      const size = document.createElement("small");
-      size.textContent = formatBytes(file.downloaded) + " / " + formatBytes(file.total);
-      progress.append(size);
+    if ((active || paused) && file.total > 0) {
+      const bytes = document.createElement("small");
+      bytes.textContent = formatBytes(file.downloaded) + " / " + formatBytes(file.total);
+      progress.append(bytes);
     }
   } else {
     progress.textContent = "—";
   }
 
-  const speed = row.insertCell();
   speed.textContent = active ? formatBytes(file.speed) + "/s" : "—";
   speed.title = speed.textContent;
-  const badge = row.insertCell();
   badge.textContent = text("state_" + file.status) || file.status;
-  if (active) row.className = "active";
+  row.classList.toggle("active", active);
+
+  const [pause, remove] = actions.children;
+  pause.hidden = complete;
+  pause.textContent = paused ? "▶︎" : "Ⅱ";
+  pause.dataset.action = paused ? "resume" : "pause";
+  labelAction(pause, paused ? "resumeDownload" : "pauseDownload");
+  const queue = downloadStatus.queues.find((entry) => entry.provider === file.provider);
+  labelAction(remove, queue?.delete_on_remove ? "removeAndRecycle" : "removeDownload");
+  for (const button of actions.children) button.disabled = pendingActions.has(file.id);
   return row;
 }
+
+rows.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  const row = button?.closest("tr");
+  if (!row || !downloadStatus || pendingActions.has(row.dataset.id)) return;
+  const {id, provider} = row.dataset;
+  const {action} = button.dataset;
+  const queue = downloadStatus.queues.find((entry) => entry.provider === provider);
+  const recycle = action === "remove" && Boolean(queue?.delete_on_remove);
+  pendingActions.add(id);
+  for (const control of button.parentElement.children) control.disabled = true;
+  queueError.hidden = true;
+  try {
+    await submitJson("/api/v1/downloads/update-download", {provider, id, action, recycle});
+    if (downloadStatus && action === "remove") {
+      downloadStatus.files = downloadStatus.files.filter((file) => file.id !== id);
+    }
+  } catch (failure) {
+    showMessage(queueError, failure.message);
+    queueError.hidden = false;
+  } finally {
+    pendingActions.delete(id);
+    if (current) renderDownloads();
+  }
+});
 
 function labelResizeHandle(handle) {
   const column = text(handle.parentElement.dataset.column);
@@ -313,7 +376,7 @@ function enableColumnResizing() {
   const table = rows.closest("table");
   const defaults = getComputedStyle(table);
   const storageKey = "download-manager-column-widths";
-  const minimums = {source: 80, file: 120, progress: 150, speed: 90, status: 90};
+  const minimums = {source: 80, file: 120, size: 80, progress: 150, speed: 90, status: 90};
   const maximum = 1600;
   let storedWidths;
   try {
@@ -380,12 +443,21 @@ function enableColumnResizing() {
 }
 
 function renderDownloads() {
-  showMessage(status, text("phase_" + current.phase) ? "phase_" + current.phase : "starting");
+  if (!current || !downloadStatus) return;
+  const queue = downloadStatus.queues.find((entry) => entry.phase === "downloading") ?? downloadStatus.queues[0];
+  const phase = "phase_" + queue?.phase;
+  showMessage(status, text(phase) ? phase : "starting");
   document.querySelector("#monitor-directory").textContent = current.monitor_directory || text("noMonitorDirectory");
-  const nextRows = document.createDocumentFragment();
-  for (const file of current.files) nextRows.append(renderFile(file, current.provider));
-  rows.replaceChildren(nextRows);
-  empty.hidden = current.files.length > 0;
+  const previous = new Map(Array.from(rows.rows, (row) => [row.dataset.id, row]));
+  let position = rows.firstElementChild;
+  for (const file of downloadStatus.files) {
+    const row = renderFile(file, previous.get(file.id));
+    previous.delete(file.id);
+    if (row !== position) rows.insertBefore(row, position);
+    position = row.nextElementSibling;
+  }
+  for (const row of previous.values()) row.remove();
+  empty.hidden = downloadStatus.files.length > 0;
   showMessage(empty, current.setup_required ? "saveToStart" : "noDownloads");
 }
 
@@ -399,16 +471,20 @@ async function refresh() {
     }
     if (!session?.username) return;
     const generation = sessionGeneration;
-    const response = await postJson("/api/v1/baidu/status", {});
+    const [response, downloadsResponse] = await Promise.all([
+      postJson("/api/v1/baidu/settings", {}),
+      postJson("/api/v1/downloads/status", {}),
+    ]);
     if (generation !== sessionGeneration) return;
-    if (response.status === 401) {
+    if (response.status === 401 || downloadsResponse.status === 401) {
       await refreshSession("sessionExpired", true);
       return;
     }
-    if (!response.ok) throw new Error();
-    const next = await response.json();
+    if (!response.ok || !downloadsResponse.ok) throw new Error();
+    const [next, nextDownloads] = await Promise.all([response.json(), downloadsResponse.json()]);
     if (generation !== sessionGeneration || dialog.open || passwordDialog.open) return;
     current = next;
+    downloadStatus = nextDownloads;
     settingsButton.disabled = false;
     renderDownloads();
     if (current.setup_required && !setupShown) {

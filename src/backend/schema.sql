@@ -23,7 +23,18 @@ CREATE TABLE IF NOT EXISTS baidu_settings (
     check_interval_seconds INTEGER NOT NULL DEFAULT 300
         CHECK (check_interval_seconds BETWEEN 1 AND 4294967295),
     delete_after_download INTEGER NOT NULL DEFAULT 0
-        CHECK (delete_after_download IN (0, 1))
+        CHECK (delete_after_download IN (0, 1)),
+    delete_on_remove INTEGER NOT NULL DEFAULT 0
+        CHECK (delete_on_remove IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS download_queue_state (
+    provider TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    cloud_path TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (disposition IN ('paused', 'removed')),
+    PRIMARY KEY (provider, account_id, file_id, cloud_path)
 );
 
 CREATE TABLE IF NOT EXISTS login_sessions (

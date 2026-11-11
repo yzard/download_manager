@@ -10,6 +10,7 @@ pub struct BaiduSettings {
     pub monitor_directory: String,
     pub check_interval_seconds: u32,
     pub delete_after_download: bool,
+    pub delete_on_remove: bool,
 }
 
 impl Default for BaiduSettings {
@@ -20,6 +21,7 @@ impl Default for BaiduSettings {
             monitor_directory: String::new(),
             check_interval_seconds: DEFAULT_CHECK_INTERVAL_SECONDS,
             delete_after_download: false,
+            delete_on_remove: false,
         }
     }
 }

@@ -20,6 +20,7 @@ use settings::{
     normalize_base_url,
 };
 use std::{
+    collections::BTreeMap,
     env,
     io::{self, Read},
     net::SocketAddr,
@@ -30,10 +31,12 @@ use storage::accounts;
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
-    sync::{Mutex, RwLock, watch},
+    sync::{Mutex, RwLock, oneshot, watch},
 };
 use web_access::RequestSecurity;
-use worker::{Download, Snapshot};
+use worker::{
+    Download, DownloadProvider, QueueAction, QueueError, QueueRequest, WorkerHandle, baidu::Baidu,
+};
 
 const DATABASE: &str = "/data/download_manager.sqlite3";
 
@@ -43,38 +46,62 @@ struct AppState {
     base_url_from_env: bool,
     account_access: Arc<RwLock<auth::AccountAccess>>,
     save_lock: Arc<Mutex<()>>,
-    status: Arc<RwLock<Snapshot>>,
+    downloads: Arc<BTreeMap<&'static str, WorkerHandle>>,
 }
 
 #[derive(Serialize)]
-struct Status {
+struct BaiduView {
     provider: &'static str,
     has_tokens: bool,
     setup_required: bool,
     monitor_directory: String,
     check_interval_seconds: u32,
     delete_after_download: bool,
+    delete_on_remove: bool,
+}
+
+impl From<&BaiduSettings> for BaiduView {
+    fn from(settings: &BaiduSettings) -> Self {
+        Self {
+            provider: Baidu::ID,
+            has_tokens: settings.has_tokens(),
+            setup_required: !settings.ready(),
+            monitor_directory: settings.monitor_directory.clone(),
+            check_interval_seconds: settings.check_interval_seconds,
+            delete_after_download: settings.delete_after_download,
+            delete_on_remove: settings.delete_on_remove,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Status {
+    #[serde(flatten)]
+    settings: BaiduView,
     phase: &'static str,
     files: Vec<Download>,
 }
 
 async fn status(State(state): State<AppState>, _session: Session, _body: Bytes) -> Json<Status> {
-    let settings = state.settings.borrow().baidu.clone();
-    let snapshot = state.status.read().await;
+    let settings = BaiduView::from(&state.settings.borrow().baidu);
+    let snapshot = state.downloads[Baidu::ID].status.read().await;
     Json(Status {
-        provider: "baidu",
-        has_tokens: settings.has_tokens(),
-        setup_required: !settings.ready(),
-        monitor_directory: settings.monitor_directory.clone(),
-        check_interval_seconds: settings.check_interval_seconds,
-        delete_after_download: settings.delete_after_download,
-        phase: if settings.ready() {
-            snapshot.phase
-        } else {
+        phase: if settings.setup_required {
             "setup"
+        } else {
+            snapshot.phase
         },
+        settings,
         files: snapshot.files(),
     })
+}
+
+async fn baidu_settings(
+    State(state): State<AppState>,
+    _session: Session,
+    _body: Bytes,
+) -> Json<BaiduView> {
+    Json(BaiduView::from(&state.settings.borrow().baidu))
 }
 
 #[derive(Deserialize)]
@@ -87,6 +114,7 @@ struct BaiduSettingsInput {
     monitor_directory: String,
     check_interval_seconds: Option<u32>,
     delete_after_download: Option<bool>,
+    delete_on_remove: Option<bool>,
 }
 
 struct AppError(StatusCode, &'static str);
@@ -489,6 +517,85 @@ fn save_error(error: impl std::fmt::Display) -> AppError {
     AppError(StatusCode::INTERNAL_SERVER_ERROR, "saveFailed")
 }
 
+#[derive(Serialize)]
+struct QueueStatus {
+    provider: &'static str,
+    phase: &'static str,
+    delete_on_remove: bool,
+}
+
+#[derive(Serialize)]
+struct DownloadStatus {
+    queues: Vec<QueueStatus>,
+    files: Vec<Download>,
+}
+
+async fn download_status(
+    State(state): State<AppState>,
+    _session: Session,
+    _body: Bytes,
+) -> Json<DownloadStatus> {
+    let settings = state.settings.borrow().clone();
+    let mut queues = Vec::new();
+    let mut files = Vec::new();
+    for (&provider, queue) in state.downloads.iter() {
+        let snapshot = queue.status.read().await;
+        queues.push(QueueStatus {
+            provider,
+            phase: snapshot.phase,
+            delete_on_remove: (queue.recycle_on_remove)(&settings),
+        });
+        files.extend(snapshot.files());
+    }
+    Json(DownloadStatus { queues, files })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DownloadActionInput {
+    provider: String,
+    id: String,
+    action: QueueAction,
+    #[serde(default)]
+    recycle: bool,
+}
+
+async fn update_download(
+    State(state): State<AppState>,
+    session: Session,
+    Json(input): Json<DownloadActionInput>,
+) -> Result<StatusCode, AppError> {
+    session.require_active().await?;
+    if input.id.len() != 64
+        || !input.id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || (input.recycle && input.action != QueueAction::Remove)
+    {
+        return Err(AppError(StatusCode::BAD_REQUEST, "invalidDownloadAction"));
+    }
+    let unavailable = || AppError(StatusCode::SERVICE_UNAVAILABLE, "queueUnavailable");
+    let (reply, result) = oneshot::channel();
+    let queue = state
+        .downloads
+        .get(input.provider.as_str())
+        .ok_or(AppError(StatusCode::NOT_FOUND, "downloadMissing"))?;
+    queue
+        .requests
+        .try_send(QueueRequest {
+            id: input.id,
+            action: input.action,
+            recycle: input.recycle,
+            reply,
+        })
+        .map_err(|_| unavailable())?;
+    match result.await.map_err(|_| unavailable())? {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(QueueError::NotFound) => Err(AppError(StatusCode::NOT_FOUND, "downloadMissing")),
+        Err(QueueError::Conflict) => Err(AppError(StatusCode::CONFLICT, "downloadChanged")),
+        Err(QueueError::RecycleFailed) => Err(AppError(StatusCode::BAD_GATEWAY, "recycleFailed")),
+        Err(QueueError::Unavailable) => Err(unavailable()),
+    }
+}
+
 async fn save_baidu_settings(
     State(state): State<AppState>,
     session: Session,
@@ -509,6 +616,9 @@ async fn save_baidu_settings(
     }
     if let Some(delete_after_download) = input.delete_after_download {
         settings.delete_after_download = delete_after_download;
+    }
+    if let Some(delete_on_remove) = input.delete_on_remove {
+        settings.delete_on_remove = delete_on_remove;
     }
     settings
         .validate()
@@ -612,6 +722,9 @@ fn app(state: AppState, web_access: web_access::AllowedHosts) -> Router {
             }),
         )
         .route("/api/v1/baidu/status", post(status))
+        .route("/api/v1/baidu/settings", post(baidu_settings))
+        .route("/api/v1/downloads/status", post(download_status))
+        .route("/api/v1/downloads/update-download", post(update_download))
         .route("/api/v1/auth/session", post(session_info))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/refresh", post(renew_session))
@@ -696,16 +809,15 @@ async fn main() -> io::Result<()> {
         TcpListener::bind(env::var("WEB_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()))
             .await?;
     let (settings, updates) = watch::channel(initial);
-    let status = Arc::new(RwLock::new(Snapshot::default()));
+    let (baidu, worker) = worker::spawn(Baidu, updates);
     let state = AppState {
         settings,
         base_url_from_env,
         account_access: Arc::new(RwLock::new(account_access)),
         save_lock: Arc::default(),
-        status: status.clone(),
+        downloads: Arc::new(BTreeMap::from([(Baidu::ID, baidu)])),
     };
     let mut terminate = signal(SignalKind::terminate())?;
-    let worker = tokio::spawn(async move { worker::run(updates, &status).await });
     eprintln!(
         "Download Manager listening on {}{}/",
         listener.local_addr()?,
@@ -769,6 +881,7 @@ fn import_baidu() -> io::Result<()> {
             .check_interval_seconds
             .unwrap_or(DEFAULT_CHECK_INTERVAL_SECONDS),
         delete_after_download: input.baidu.delete_after_download.unwrap_or(false),
+        delete_on_remove: input.baidu.delete_on_remove.unwrap_or(false),
     };
     let general = GeneralSettings {
         download_directory: input.download_directory,
