@@ -4,11 +4,14 @@ use crate::settings::{BaiduSettings, GeneralSettings, Language};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
+const SCHEMA_VERSION: u32 = 6;
+
 const LOAD_BAIDU: &str = "
 SELECT bduss
      , stoken
      , monitor_directory
      , check_interval_seconds
+     , delete_after_download
   FROM baidu_settings
  WHERE singleton = 1";
 
@@ -35,14 +38,16 @@ INSERT INTO baidu_settings (
   , stoken
   , monitor_directory
   , check_interval_seconds
+  , delete_after_download
 )
-VALUES (1, ?1, ?2, ?3, ?4)
+VALUES (1, ?1, ?2, ?3, ?4, ?5)
 ON CONFLICT (singleton) DO UPDATE
 SET bduss = excluded.bduss
   , stoken = excluded.stoken
   , monitor_directory = excluded.monitor_directory
   , check_interval_seconds = excluded.check_interval_seconds
-WHERE ?5 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
+  , delete_after_download = excluded.delete_after_download
+WHERE ?6 OR baidu_settings.bduss = '' OR baidu_settings.stoken = ''";
 
 fn connect(path: &Path) -> io::Result<Connection> {
     OpenOptions::new()
@@ -58,14 +63,14 @@ fn connect(path: &Path) -> io::Result<Connection> {
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(io::Error::other)?;
-    if schema_version(&connection)? != 5 {
+    if schema_version(&connection)? != SCHEMA_VERSION {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(io::Error::other)?;
         let version = schema_version(&transaction)?;
         match version {
             0 => transaction.execute_batch(include_str!("../schema.sql")),
-            1..=4 => {
+            1..=5 => {
                 for (target, migration) in [
                     (
                         2,
@@ -74,6 +79,10 @@ fn connect(path: &Path) -> io::Result<Connection> {
                     (3, include_str!("../migrations/003_general_settings.sql")),
                     (4, include_str!("../migrations/004_auth_sessions.sql")),
                     (5, include_str!("../migrations/005_general_base_url.sql")),
+                    (
+                        6,
+                        include_str!("../migrations/006_baidu_delete_after_download.sql"),
+                    ),
                 ] {
                     if version < target {
                         transaction
@@ -83,7 +92,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
                 }
                 Ok(())
             }
-            5 => Ok(()),
+            SCHEMA_VERSION => Ok(()),
             _ => {
                 return Err(io::Error::other(
                     "Database schema is newer than this Download Manager version",
@@ -91,9 +100,9 @@ fn connect(path: &Path) -> io::Result<Connection> {
             }
         }
         .map_err(io::Error::other)?;
-        if version < 5 {
+        if version < SCHEMA_VERSION {
             transaction
-                .pragma_update(None, "user_version", 5)
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(io::Error::other)?;
         }
         transaction.commit().map_err(io::Error::other)?;
@@ -115,6 +124,7 @@ pub fn load_baidu(path: &Path) -> io::Result<BaiduSettings> {
                 stoken: row.get(1)?,
                 monitor_directory: row.get(2)?,
                 check_interval_seconds: row.get(3)?,
+                delete_after_download: row.get(4)?,
             })
         })
         .optional()
@@ -196,6 +206,7 @@ fn write_baidu(
                 settings.stoken,
                 settings.monitor_directory,
                 settings.check_interval_seconds,
+                settings.delete_after_download,
                 replace_existing
             ],
         )

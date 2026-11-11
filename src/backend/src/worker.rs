@@ -1,4 +1,7 @@
+mod cleanup;
+
 use crate::settings::{BaiduSettings, GeneralSettings, Settings, save_private};
+use cleanup::{CloudFile, FileMetadata};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, io, path::Path, process::Stdio, time::Duration};
@@ -19,6 +22,10 @@ pub struct Download {
     pub downloaded: u64,
     pub total: Option<u64>,
     pub speed: u64,
+    #[serde(skip)]
+    cloud_file: Option<CloudFile>,
+    #[serde(skip)]
+    saved_path: Option<String>,
 }
 
 #[derive(Default)]
@@ -26,7 +33,9 @@ pub struct Snapshot {
     pub phase: &'static str,
     files: BTreeMap<u64, Download>,
     metadata_task: Option<u64>,
+    metadata: FileMetadata,
     queue_ready: bool,
+    round_finished: bool,
 }
 
 impl Snapshot {
@@ -44,6 +53,9 @@ impl Snapshot {
     }
 
     fn apply_line(&mut self, line: &str) {
+        if line.starts_with("下载结束, 时间:") {
+            self.round_finished = true;
+        }
         if line.contains("Baidu login failed") || line.contains("未登录") {
             self.phase = "login_failed";
         } else if line.contains("以下文件下载失败") || line.contains("文件或目录不存在")
@@ -54,6 +66,14 @@ impl Snapshot {
         if let Some((id, event)) = task_event(line) {
             self.apply_event(id, event);
             return;
+        }
+
+        if let Some(id) = self.metadata_task
+            && let Some(cloud_file) = self.metadata.read_line(line)
+            && let Some(file) = self.files.get_mut(&id)
+            && file.path == cloud_file.path
+        {
+            file.cloud_file = Some(cloud_file);
         }
 
         let mut cells = line
@@ -88,12 +108,19 @@ impl Snapshot {
                     downloaded: 0,
                     total: None,
                     speed: 0,
+                    cloud_file: None,
+                    saved_path: None,
                 },
             );
             return;
         }
         if event == "----" {
             self.metadata_task = Some(id);
+            self.metadata = FileMetadata::default();
+            if let Some(file) = self.files.get_mut(&id) {
+                file.cloud_file = None;
+                file.saved_path = None;
+            }
             return;
         }
         if event.starts_with("准备下载: ") {
@@ -105,9 +132,13 @@ impl Snapshot {
         let Some(file) = self.files.get_mut(&id) else {
             return;
         };
-        if event.starts_with("准备下载: ") {
+        if let Some(path) = event.strip_prefix("准备下载: ") {
             file.status = "active";
             file.speed = 0;
+            file.saved_path = None;
+            if file.path != path {
+                file.cloud_file = None;
+            }
         } else if let Some(progress) = event.strip_prefix("↓ ") {
             let mut fields = progress.split_whitespace();
             if let Some((done, total)) = fields.next().and_then(|field| field.split_once('/'))
@@ -123,6 +154,11 @@ impl Snapshot {
                 .unwrap_or(0);
         } else if event.starts_with("下载完成, 保存位置:") || event.starts_with("文件已经存在:")
         {
+            if file.status == "active" {
+                file.saved_path = event
+                    .strip_prefix("下载完成, 保存位置: ")
+                    .map(str::to_owned);
+            }
             file.status = if event.starts_with("文件已经存在:") {
                 "existing"
             } else {
@@ -133,9 +169,11 @@ impl Snapshot {
         } else if event.contains("重试") {
             file.status = "retrying";
             file.speed = 0;
+            file.saved_path = None;
         } else if event.contains("失败") || event.contains("错误") {
             file.status = "failed";
             file.speed = 0;
+            file.saved_path = None;
             self.phase = "download_failed";
         }
     }
@@ -279,6 +317,22 @@ pub async fn run(mut settings: watch::Receiver<Settings>, status: &RwLock<Snapsh
                     false
                 }
             };
+            if result && current.baidu.delete_after_download {
+                let candidates = {
+                    let snapshot = status.read().await;
+                    snapshot.round_finished.then(|| {
+                        snapshot
+                            .files
+                            .values()
+                            .filter(|file| file.status == "complete")
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                };
+                if let Some(candidates) = candidates {
+                    cleanup::recycle_completed(candidates, &current, &settings).await;
+                }
+            }
             let mut snapshot = status.write().await;
             snapshot.queue_ready = true;
             for file in snapshot.files.values_mut() {

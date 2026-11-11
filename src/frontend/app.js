@@ -201,6 +201,7 @@ function openSettings() {
   updateBaseUrlField();
   form.elements.monitor_directory.value = current.monitor_directory || "";
   form.elements.check_interval_seconds.value = current.check_interval_seconds;
+  form.elements.delete_after_download.checked = current.delete_after_download;
   form.elements.bduss.required = !current.has_tokens;
   form.elements.stoken.required = !current.has_tokens;
   showMessage(settingsDescription, current.has_tokens ? "keepTokens" : "enterTokens");
@@ -221,9 +222,11 @@ bindForm(generalForm, async (payload) => {
 
 bindForm(form, async (payload) => {
   const check_interval_seconds = Number(payload.check_interval_seconds);
-  await submitJson("/api/v1/baidu/save-settings", {...payload, check_interval_seconds});
+  const delete_after_download = form.elements.delete_after_download.checked;
+  await submitJson("/api/v1/baidu/save-settings", {...payload, check_interval_seconds, delete_after_download});
   current.monitor_directory = payload.monitor_directory.trim();
   current.check_interval_seconds = check_interval_seconds;
+  current.delete_after_download = delete_after_download;
   current.has_tokens = true;
   current.setup_required = false;
   for (const token of [form.elements.bduss, form.elements.stoken]) {

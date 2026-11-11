@@ -42,6 +42,8 @@ const messages = {
   baidu: ["百度网盘", "Baidu Netdisk"],
   monitorDirectory: ["网盘监控目录", "Watched cloud folder"],
   checkInterval: ["检查间隔（秒）", "Check interval (seconds)"],
+  deleteAfterDownload: ["下载完成后删除云端原文件", "Delete the cloud original after download"],
+  deleteAfterDownloadHelp: ["本地文件通过完整性校验后，原文件会移到百度网盘回收站。", "The app moves the original to the Baidu Netdisk recycle bin after it checks the local file."],
   saveBaidu: ["保存百度设置", "Save Baidu settings"],
   account: ["账号", "Account"],
   xunlei: ["迅雷 · 待接入", "Xunlei · Coming later"],

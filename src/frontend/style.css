@@ -80,6 +80,9 @@ input, select { display: block; width: 100%; margin-top: 4px; padding: 9px; font
 .login-panel > .muted, .provider-note { margin-top: 8px; }
 .settings-section { border: 1px solid var(--border); border-radius: 8px; margin: 16px 0; padding: 14px; }
 .settings-section legend { font-weight: 650; padding: 0 6px; }
+.checkbox-option { display: flex; align-items: center; gap: 8px; }
+.checkbox-option input { width: auto; margin: 0; accent-color: var(--accent); }
+#baidu-recycle-help { margin: 4px 0 0 21px; }
 .account-settings { border-top: 1px solid var(--border); padding-top: 12px; }
 .account-settings h3 { font-size: 14px; margin: 0 0 8px; }
 @media (max-width: 580px) {

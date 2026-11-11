@@ -53,6 +53,7 @@ struct Status {
     setup_required: bool,
     monitor_directory: String,
     check_interval_seconds: u32,
+    delete_after_download: bool,
     phase: &'static str,
     files: Vec<Download>,
 }
@@ -66,6 +67,7 @@ async fn status(State(state): State<AppState>, _session: Session, _body: Bytes) 
         setup_required: !settings.ready(),
         monitor_directory: settings.monitor_directory.clone(),
         check_interval_seconds: settings.check_interval_seconds,
+        delete_after_download: settings.delete_after_download,
         phase: if settings.ready() {
             snapshot.phase
         } else {
@@ -84,6 +86,7 @@ struct BaiduSettingsInput {
     stoken: String,
     monitor_directory: String,
     check_interval_seconds: Option<u32>,
+    delete_after_download: Option<bool>,
 }
 
 struct AppError(StatusCode, &'static str);
@@ -504,6 +507,9 @@ async fn save_baidu_settings(
     if let Some(interval) = input.check_interval_seconds {
         settings.check_interval_seconds = interval;
     }
+    if let Some(delete_after_download) = input.delete_after_download {
+        settings.delete_after_download = delete_after_download;
+    }
     settings
         .validate()
         .map_err(|error| AppError(StatusCode::BAD_REQUEST, error))?;
@@ -762,6 +768,7 @@ fn import_baidu() -> io::Result<()> {
             .baidu
             .check_interval_seconds
             .unwrap_or(DEFAULT_CHECK_INTERVAL_SECONDS),
+        delete_after_download: input.baidu.delete_after_download.unwrap_or(false),
     };
     let general = GeneralSettings {
         download_directory: input.download_directory,

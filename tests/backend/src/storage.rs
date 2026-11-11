@@ -8,6 +8,7 @@ fn updates_provider_and_account_without_overwriting_each_other() {
     let path = dir.path().join("settings.sqlite3");
     assert!(load_account_access(&path, false).unwrap().account.is_none());
     let mut settings = load_baidu(&path).unwrap();
+    assert!(!settings.delete_after_download);
     settings.bduss = "token-one".to_owned();
     settings.stoken = "token-two".to_owned();
     settings.monitor_directory = "/NAS下载".to_owned();
@@ -35,6 +36,7 @@ fn updates_provider_and_account_without_overwriting_each_other() {
     assert_eq!(load_baidu(&path).unwrap().check_interval_seconds, 123);
 
     settings.bduss = "new-token".to_owned();
+    settings.delete_after_download = true;
     assert!(!import_baidu(&path, &settings, &GeneralSettings::default()).unwrap());
     assert_eq!(load_baidu(&path).unwrap().bduss, "token-one");
     change_password(&path, "original-hash", "new-hash").unwrap();
@@ -54,6 +56,10 @@ fn updates_provider_and_account_without_overwriting_each_other() {
         "new-hash"
     );
     assert_eq!(load_baidu(&path).unwrap().bduss, "new-token");
+    assert!(load_baidu(&path).unwrap().delete_after_download);
+    settings.delete_after_download = false;
+    save_baidu(&path, &settings).unwrap();
+    assert!(!load_baidu(&path).unwrap().delete_after_download);
 }
 
 #[test]
@@ -84,6 +90,7 @@ fn migrates_version_one_without_losing_account_or_baidu_settings() {
         .unwrap();
     drop(legacy);
     let settings = load_baidu(&path).unwrap();
+    assert!(!settings.delete_after_download);
     assert_eq!(settings.check_interval_seconds, 300);
     assert_eq!(settings.bduss, "one");
     assert_eq!(settings.stoken, "two");

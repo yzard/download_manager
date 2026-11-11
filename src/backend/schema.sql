@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS baidu_settings (
     stoken TEXT NOT NULL,
     monitor_directory TEXT NOT NULL,
     check_interval_seconds INTEGER NOT NULL DEFAULT 300
-        CHECK (check_interval_seconds BETWEEN 1 AND 4294967295)
+        CHECK (check_interval_seconds BETWEEN 1 AND 4294967295),
+    delete_after_download INTEGER NOT NULL DEFAULT 0
+        CHECK (delete_after_download IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS login_sessions (
