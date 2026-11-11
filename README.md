@@ -141,3 +141,9 @@ docker compose -f /data/docker/4_torrent.yaml stop download_manager
 ```
 
 如果页面提示百度登录失败，使用齿轮重新填写 Token。
+
+## 许可证
+
+Download Manager 采用 Apache License 2.0，完整条款见 [LICENSE](LICENSE)。
+
+镜像包含 BaiduPCS-Go。该组件采用上游的 Apache License 2.0，版权声明见 [BaiduPCS-Go v4.0.2 的上游许可证](https://github.com/qjfoidnh/BaiduPCS-Go/blob/v4.0.2/LICENSE)。构建时从上游获取该版本的许可证，并将两份许可证放入镜像的 `/licenses/` 目录。

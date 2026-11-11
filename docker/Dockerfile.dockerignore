@@ -6,4 +6,4 @@
 !src/backend/migrations/**
 !src/backend/src/**
 !src/frontend/**
-!LICENSE.BaiduPCS-Go
+!LICENSE

@@ -2,6 +2,7 @@
 name = "download_manager"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 argon2 = "0.5"

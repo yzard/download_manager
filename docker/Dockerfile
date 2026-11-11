@@ -21,6 +21,11 @@ RUN set -eu; \
     chmod 755 /usr/local/bin/BaiduPCS-Go; \
     mkdir -p /rootfs/config /rootfs/downloads /rootfs/data
 
+RUN set -eu; \
+    curl --fail --location --retry 3 --silent --show-error --output /BaiduPCS-Go.LICENSE \
+      "https://raw.githubusercontent.com/qjfoidnh/BaiduPCS-Go/v${BAIDUPCS_VERSION}/LICENSE"; \
+    echo "ddadea2805326e3cb072a8b6769885fc1399475922e4c7d60f5e9f8e28c63e3d  /BaiduPCS-Go.LICENSE" | sha256sum -c -
+
 FROM busybox:1.37.0-musl AS runtime-tools
 
 FROM rust:1.99-alpine AS web-build
@@ -46,7 +51,8 @@ COPY --from=download /usr/local/bin/BaiduPCS-Go /usr/local/bin/BaiduPCS-Go
 COPY --from=web-build /download_manager /usr/local/bin/download_manager
 COPY --from=download --chown=1000:1000 /rootfs/ /
 COPY docker/entrypoint.sh /entrypoint.sh
-COPY LICENSE.BaiduPCS-Go /licenses/BaiduPCS-Go.txt
+COPY LICENSE /licenses/Download-Manager.txt
+COPY --from=download /BaiduPCS-Go.LICENSE /licenses/BaiduPCS-Go.txt
 
 ENV HOME=/config \
     BAIDUPCS_GO_CONFIG_DIR=/config \
