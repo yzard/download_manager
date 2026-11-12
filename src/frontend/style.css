@@ -90,15 +90,19 @@ input, select { display: block; width: 100%; margin-top: 4px; padding: 9px; font
 .checkbox-help { margin: 4px 0 0 21px; }
 .queue-error { padding: 0 22px 12px; }
 .task-actions { padding-inline: 12px; }
-.task-actions button { width: 32px; height: 32px; padding: 0; font-size: 18px; line-height: 1; }
-.task-actions button + button { margin-left: 6px; }
-.task-actions button:is([data-action="pause"], [data-action="resume"]) {
+.task-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
   vertical-align: middle;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
 }
+.task-actions button + button { margin-left: 6px; }
 .task-actions button[data-action="pause"]::before,
 .task-actions button[data-action="pause"]::after {
   content: "";
