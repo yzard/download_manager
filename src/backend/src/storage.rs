@@ -1,11 +1,12 @@
 pub mod accounts;
 pub mod download_queue;
+pub mod download_records;
 
 use crate::settings::{BaiduSettings, GeneralSettings, Language};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 
 const LOAD_BAIDU: &str = "
 SELECT bduss
@@ -74,7 +75,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
         let version = schema_version(&transaction)?;
         match version {
             0 => transaction.execute_batch(include_str!("../schema.sql")),
-            1..=6 => {
+            1..=7 => {
                 for (target, migration) in [
                     (
                         2,
@@ -88,6 +89,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
                         include_str!("../migrations/006_baidu_delete_after_download.sql"),
                     ),
                     (7, include_str!("../migrations/007_download_queue.sql")),
+                    (8, include_str!("../migrations/008_download_records.sql")),
                 ] {
                     if version < target {
                         transaction

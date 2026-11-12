@@ -1,14 +1,23 @@
 use super::{
-    Download, DownloadProvider, DownloadSession, DownloadState, DownloadTransfer, RemoteFile,
-    Snapshot, TransferProgress,
+    Download, DownloadProvider, DownloadSession, DownloadState, DownloadTransfer,
+    LocalProgressKind, RemoteFile, Snapshot, TransferProgress,
 };
 use crate::{
+    auth,
     settings::Settings,
-    storage::download_queue::{self, Disposition},
+    storage::{
+        download_queue::{self, Disposition},
+        download_records::{self, Completion, CompletionReason, Record, Records},
+    },
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, io, path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    path::Path,
+    time::Duration,
+};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -41,13 +50,45 @@ pub(super) struct Queue<'a, P: DownloadProvider> {
     pub database: &'a Path,
 }
 
-fn task_id(provider: &str, account: &str, file: &RemoteFile) -> String {
+fn task_id(provider: &str, account: &str, file: &str, path: &str) -> String {
     let mut hash = Sha256::new();
-    for part in [provider, account, &file.id, &file.path] {
+    for part in [provider, account, file, path] {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
     }
     format!("{:x}", hash.finalize())
+}
+
+fn saved_bytes(file: &Download) -> u64 {
+    file.local_progress
+        .filter(|local| local.kind == LocalProgressKind::Checkpoint)
+        .map_or(file.progress.downloaded, |local| {
+            local.bytes.max(file.progress.downloaded)
+        })
+}
+
+fn history_file(
+    provider: &'static str,
+    account: &str,
+    file_id: String,
+    path: String,
+    record: Record,
+) -> Download {
+    Download {
+        id: task_id(provider, account, &file_id, &path),
+        provider,
+        path,
+        remote_id: file_id,
+        progress: TransferProgress {
+            status: DownloadState::Complete,
+            downloaded: record.downloaded,
+            total: Some(record.total),
+            speed: 0,
+        },
+        last_failure: None,
+        local_progress: None,
+        completion: record.completion,
+    }
 }
 
 impl<P: DownloadProvider> Queue<'_, P> {
@@ -73,72 +114,223 @@ impl<P: DownloadProvider> Queue<'_, P> {
         Ok(())
     }
 
+    pub(super) async fn prepare_account(&self) -> io::Result<()> {
+        let account = self.session.account().to_owned();
+        {
+            let mut snapshot = self.status.write().await;
+            if snapshot.account == account {
+                snapshot
+                    .files
+                    .retain(|file| self.session.contains(&file.path));
+                return Ok(());
+            }
+            snapshot.account.clear();
+            snapshot.files.clear();
+            snapshot.history.clear();
+        }
+        let database = self.database.to_owned();
+        let records = tokio::task::spawn_blocking({
+            let account = account.clone();
+            move || download_records::load(&database, P::ID, &account)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        let mut snapshot = self.status.write().await;
+        snapshot.history = Self::history(&account, records);
+        snapshot.account = account;
+        Ok(())
+    }
+
     pub(super) async fn reconcile(
         &self,
         mut files: Vec<RemoteFile>,
         preserve: bool,
     ) -> io::Result<()> {
-        let account = self.session.account().to_owned();
-        let database = self.database.to_owned();
-        let dispositions = tokio::task::spawn_blocking({
-            let account = account.clone();
-            move || download_queue::load(&database, P::ID, &account)
-        })
-        .await
-        .map_err(io::Error::other)??;
-        let mut paths = std::collections::HashSet::with_capacity(files.len());
+        let mut paths = HashSet::with_capacity(files.len());
         if files.iter().any(|file| {
             file.id.is_empty() || !self.session.contains(&file.path) || !paths.insert(&file.path)
         }) {
             return Err(io::Error::other("Invalid or duplicate cloud file identity"));
         }
         files.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.path.cmp(&b.path)));
-        let mut snapshot = self.status.write().await;
-        let mut old: HashMap<_, _> = snapshot.files.iter().map(|file| (&file.id, file)).collect();
-        let next = files
-            .into_iter()
-            .filter_map(|file| {
-                let id = task_id(P::ID, &account, &file);
-                let prior = old.remove(&id);
-                let disposition = dispositions.get(&(file.id.clone(), file.path.clone()));
-                if disposition == Some(&Disposition::Removed) {
-                    return None;
-                }
-                let progress = match (disposition, prior) {
-                    (Some(Disposition::Paused), prior) => TransferProgress {
-                        status: DownloadState::Paused,
-                        speed: 0,
-                        total: Some(file.size),
-                        downloaded: prior.map_or(0, |row| row.progress.downloaded),
-                    },
-                    (_, Some(row)) if preserve => row.progress,
-                    _ => TransferProgress {
-                        status: DownloadState::Queued,
-                        downloaded: prior
-                            .filter(|row| {
-                                !matches!(
-                                    row.progress.status,
-                                    DownloadState::Complete | DownloadState::Existing
-                                )
-                            })
-                            .map_or(0, |row| row.progress.downloaded),
-                        total: Some(file.size),
-                        speed: 0,
-                    },
-                };
-                Some(Download {
-                    id,
-                    provider: P::ID,
-                    path: file.path,
-                    remote_id: file.id,
-                    progress,
-                    last_failure: prior.and_then(|row| row.last_failure),
-                    local_progress: file.local_progress,
-                })
-            })
+        let account = self.session.account().to_owned();
+        let database = self.database.to_owned();
+        let (dispositions, mut records) = tokio::task::spawn_blocking({
+            let account = account.clone();
+            move || -> io::Result<_> {
+                Ok((
+                    download_queue::load(&database, P::ID, &account)?,
+                    download_records::load(&database, P::ID, &account)?,
+                ))
+            }
+        })
+        .await
+        .map_err(io::Error::other)??;
+        let old: HashMap<_, _> = self
+            .status
+            .read()
+            .await
+            .files
+            .iter()
+            .map(|file| (file.id.clone(), file.clone()))
             .collect();
-        snapshot.account = account;
+        let seen: HashSet<_> = files
+            .iter()
+            .map(|file| (file.id.clone(), file.path.clone()))
+            .collect();
+        let seen_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
+        let mut changes = Records::new();
+        for (key, record) in &records {
+            if record.completion.is_some()
+                || seen.contains(key)
+                || !self.session.contains(&key.1)
+                || dispositions.get(key) == Some(&Disposition::Removed)
+            {
+                continue;
+            }
+            let prior = old.get(&task_id(P::ID, &account, &key.0, &key.1));
+            let reason = if seen_ids.contains(&key.0) {
+                CompletionReason::RemoteMoved
+            } else {
+                CompletionReason::RemoteDeleted
+            };
+            changes.insert(
+                key.clone(),
+                Record {
+                    total: record.total,
+                    downloaded: prior
+                        .map_or(record.downloaded, saved_bytes)
+                        .min(record.total),
+                    completion: Some(Completion {
+                        reason,
+                        at: auth::now()?,
+                    }),
+                },
+            );
+        }
+
+        let mut next = Vec::new();
+        for file in files {
+            let id = task_id(P::ID, &account, &file.id, &file.path);
+            let prior = old.get(&id);
+            let key = (file.id.clone(), file.path.clone());
+            let disposition = dispositions.get(&key);
+            let record = records.get(&key);
+            if disposition == Some(&Disposition::Removed)
+                || record.is_some_and(|record| record.completion.is_some())
+            {
+                continue;
+            }
+            let downloaded = prior.map_or_else(
+                || record.map_or(0, |record| record.downloaded),
+                |row| row.progress.downloaded,
+            );
+            let progress = match (disposition, prior) {
+                (Some(Disposition::Paused), _) => TransferProgress {
+                    status: DownloadState::Paused,
+                    speed: 0,
+                    total: Some(file.size),
+                    downloaded,
+                },
+                (_, Some(row)) if preserve => row.progress,
+                _ => TransferProgress {
+                    status: DownloadState::Queued,
+                    downloaded,
+                    total: Some(file.size),
+                    speed: 0,
+                },
+            };
+            let total = progress.total.unwrap_or(file.size);
+            let pending = Record {
+                total,
+                downloaded: progress.downloaded.min(total),
+                completion: None,
+            };
+            if record != Some(&pending) {
+                changes.insert(key, pending);
+            }
+            next.push(Download {
+                id,
+                provider: P::ID,
+                path: file.path,
+                remote_id: file.id,
+                progress,
+                last_failure: prior.and_then(|row| row.last_failure),
+                local_progress: file.local_progress,
+                completion: None,
+            });
+        }
+        self.save_records(&changes).await?;
+        records.extend(changes);
+        let mut snapshot = self.status.write().await;
+        snapshot.account = account.clone();
         snapshot.files = next;
+        snapshot.history = Self::history(&account, records);
+        Ok(())
+    }
+
+    fn history(account: &str, records: Records) -> Vec<Download> {
+        records
+            .into_iter()
+            .filter_map(|((id, path), record)| {
+                record
+                    .completion
+                    .map(|_| history_file(P::ID, account, id, path, record))
+            })
+            .collect()
+    }
+
+    async fn save_records(&self, records: &Records) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let account = self.session.account().to_owned();
+        let database = self.database.to_owned();
+        let records = records.clone();
+        tokio::task::spawn_blocking(move || {
+            download_records::save(&database, P::ID, &account, &records)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    pub(super) async fn archive(
+        &self,
+        file: &Download,
+        progress: TransferProgress,
+        reason: CompletionReason,
+    ) -> io::Result<()> {
+        let total = progress
+            .total
+            .or(file.progress.total)
+            .unwrap_or(progress.downloaded);
+        let record = Record {
+            total,
+            downloaded: match reason {
+                CompletionReason::Downloaded | CompletionReason::AlreadyLocal => total,
+                CompletionReason::RemoteDeleted | CompletionReason::RemoteMoved => {
+                    saved_bytes(file).min(total)
+                }
+            },
+            completion: Some(Completion {
+                reason,
+                at: auth::now()?,
+            }),
+        };
+        self.save_records(&Records::from([(
+            (file.remote_id.clone(), file.path.clone()),
+            record,
+        )]))
+        .await?;
+        let mut snapshot = self.status.write().await;
+        snapshot.files.retain(|row| row.id != file.id);
+        snapshot.history.push(history_file(
+            P::ID,
+            self.session.account(),
+            file.remote_id.clone(),
+            file.path.clone(),
+            record,
+        ));
         Ok(())
     }
 
@@ -254,7 +446,16 @@ impl<P: DownloadProvider> Queue<'_, P> {
                     );
                     QueueError::RecycleFailed
                 })?;
-            self.persist(&file, Some(Disposition::Removed)).await?;
+            return self
+                .archive(&file, file.progress, CompletionReason::RemoteDeleted)
+                .await
+                .map_err(|error| {
+                    eprintln!(
+                        "{} could not save the recycled download record: {error}",
+                        P::ID
+                    );
+                    QueueError::Unavailable
+                });
         }
         if request.action == QueueAction::Remove {
             self.status

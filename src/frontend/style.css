@@ -19,6 +19,10 @@ h2 { font-size: 19px; }
 .page-header { margin-bottom: 24px; }
 .panel { background: white; border: 1px solid var(--border); border-radius: 13px; overflow: hidden; }
 .panel-header { padding: 20px 22px; }
+.download-view, .download-filter { display: flex; align-items: center; gap: 10px; }
+.download-view { justify-content: flex-end; flex-wrap: wrap; }
+.download-filter { margin: 0; font-size: 13px; white-space: nowrap; }
+.download-filter select { width: auto; margin: 0; padding: 5px 8px; }
 .muted, .empty { color: var(--muted); }
 .status { color: var(--accent); text-align: right; font-size: 13px; }
 .table-scroll { overflow-x: auto; }

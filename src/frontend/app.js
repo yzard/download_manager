@@ -12,6 +12,7 @@ const queueError = document.querySelector("#queue-error");
 const pendingActions = new Set();
 const empty = document.querySelector("#empty");
 const status = document.querySelector("#service-status");
+const downloadFilter = document.querySelector("#download-filter");
 const loginPanel = document.querySelector("#login-panel");
 const loginForm = document.querySelector("#login-form");
 const loginTitle = document.querySelector("#login-title");
@@ -80,6 +81,7 @@ function showSession(next, message) {
     dialog.close();
     current = undefined;
     downloadStatus = undefined;
+    downloadFilter.value = "active";
     settingsButton.disabled = true;
     setupShown = false;
     rows.replaceChildren();
@@ -333,7 +335,9 @@ function renderFile(file, row = document.createElement("tr")) {
 
   const active = file.status === "active" || file.status === "retrying";
   const paused = file.status === "paused";
-  const complete = file.status === "complete" || file.status === "existing";
+  const archived = Boolean(file.completion);
+  const remoteGone = archived && ["remote_deleted", "remote_moved"].includes(file.completion.reason);
+  const complete = (file.status === "complete" || file.status === "existing") && !remoteGone;
   const local = !active && !complete ? file.local_progress : null;
   const useLocal = local && (local.kind === "checkpoint"
     ? local.bytes >= file.downloaded
@@ -371,12 +375,16 @@ function renderFile(file, row = document.createElement("tr")) {
   speed.title = speed.textContent;
   badge.className = "download-status";
   badge.textContent = text("state_" + file.status) || file.status;
+  if (archived && file.completion.reason !== "downloaded") {
+    showStatusDetail(badge, text("completion_" + file.completion.reason));
+  }
   const queue = downloadStatus.queues.find((entry) => entry.provider === file.provider);
   renderRetryDetails(badge, file, queue);
   row.classList.toggle("active", active);
 
   const [pause, remove] = actions.children;
-  pause.hidden = complete;
+  pause.hidden = complete || archived;
+  remove.hidden = archived;
   pause.dataset.action = paused ? "resume" : "pause";
   labelAction(pause, paused ? "resumeDownload" : "pauseDownload");
   labelAction(remove, queue?.delete_on_remove ? "removeAndRecycle" : "removeDownload");
@@ -492,14 +500,17 @@ function renderDownloads() {
   document.querySelector("#monitor-directory").textContent = current.monitor_directory || text("noMonitorDirectory");
   const previous = new Map(Array.from(rows.rows, (row) => [row.dataset.id, row]));
   let position = rows.firstElementChild;
-  for (const file of downloadStatus.files) {
+  const files = downloadFilter.value === "all"
+    ? downloadStatus.files
+    : downloadStatus.files.filter((file) => !file.completion);
+  for (const file of files) {
     const row = renderFile(file, previous.get(file.id));
     previous.delete(file.id);
     if (row !== position) rows.insertBefore(row, position);
     position = row.nextElementSibling;
   }
   for (const row of previous.values()) row.remove();
-  empty.hidden = downloadStatus.files.length > 0;
+  empty.hidden = files.length > 0;
   showMessage(empty, current.setup_required ? "saveToStart" : "noDownloads");
 }
 
@@ -515,7 +526,7 @@ async function refresh() {
     const generation = sessionGeneration;
     const [response, downloadsResponse] = await Promise.all([
       postJson("/api/v1/baidu/settings", {}),
-      postJson("/api/v1/downloads/status", {}),
+      postJson("/api/v1/downloads/status", {include_completed: downloadFilter.value === "all"}),
     ]);
     if (generation !== sessionGeneration) return;
     if (response.status === 401 || downloadsResponse.status === 401) {
@@ -540,5 +551,6 @@ async function refresh() {
   }
 }
 
+downloadFilter.addEventListener("change", renderDownloads);
 enableColumnResizing();
 refresh();

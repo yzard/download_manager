@@ -533,14 +533,28 @@ struct DownloadStatus {
     files: Vec<Download>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DownloadStatusInput {
+    #[serde(default)]
+    include_completed: bool,
+}
+
 async fn download_status(
     State(state): State<AppState>,
     _session: Session,
-    _body: Bytes,
-) -> Json<DownloadStatus> {
+    body: Bytes,
+) -> Result<Json<DownloadStatus>, AppError> {
+    let input = if body.is_empty() {
+        DownloadStatusInput::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| AppError(StatusCode::BAD_REQUEST, "invalidDownloadFilter"))?
+    };
     let settings = state.settings.borrow().clone();
     let mut queues = Vec::new();
     let mut files = Vec::new();
+    let mut completed = Vec::new();
     for (&provider, queue) in state.downloads.iter() {
         let snapshot = queue.status.read().await;
         queues.push(QueueStatus {
@@ -550,8 +564,12 @@ async fn download_status(
             delete_on_remove: (queue.recycle_on_remove)(&settings),
         });
         files.extend(snapshot.files());
+        if input.include_completed {
+            completed.extend(snapshot.completed_files());
+        }
     }
-    Json(DownloadStatus { queues, files })
+    files.extend(completed);
+    Ok(Json(DownloadStatus { queues, files }))
 }
 
 #[derive(Deserialize)]

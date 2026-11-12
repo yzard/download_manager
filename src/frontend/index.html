@@ -51,7 +51,16 @@
           <h2 id="downloads-title" data-text="downloads">百度网盘下载</h2>
           <p id="monitor-directory" class="muted"></p>
         </div>
-        <p id="service-status" class="status" role="status" data-text="connecting">正在连接</p>
+        <div class="download-view">
+          <p id="service-status" class="status" role="status" data-text="connecting">正在连接</p>
+          <label for="download-filter" class="download-filter">
+            <span data-text="downloadFilter">显示</span>
+            <select id="download-filter">
+              <option value="active" selected data-text="activeDownloads">进行中</option>
+              <option value="all" data-text="allDownloads">全部</option>
+            </select>
+          </label>
+        </div>
       </div>
       <p id="queue-error" class="error queue-error" role="alert" hidden></p>
       <div class="table-scroll">

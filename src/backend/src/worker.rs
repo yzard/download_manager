@@ -1,7 +1,11 @@
 pub mod baidu;
 mod queue;
 
-use crate::{DATABASE, settings::Settings};
+use crate::{
+    DATABASE,
+    settings::Settings,
+    storage::download_records::{Completion, CompletionReason},
+};
 use queue::Queue;
 pub use queue::{QueueAction, QueueError, QueueRequest};
 use serde::Serialize;
@@ -161,6 +165,7 @@ pub struct Download {
     pub progress: TransferProgress,
     pub last_failure: Option<FailureReason>,
     pub local_progress: Option<LocalProgress>,
+    pub completion: Option<Completion>,
     #[serde(skip)]
     pub remote_id: String,
 }
@@ -170,6 +175,7 @@ pub struct Snapshot {
     pub phase: &'static str,
     account: String,
     files: Vec<Download>,
+    history: Vec<Download>,
     next_scan: Option<Instant>,
 }
 
@@ -192,6 +198,17 @@ impl Snapshot {
             DownloadState::Queued => 1,
             DownloadState::Paused => 2,
             _ => 3,
+        });
+        files
+    }
+
+    pub fn completed_files(&self) -> Vec<Download> {
+        let mut files = self.history.clone();
+        files.sort_by(|a, b| {
+            b.completion
+                .map(|entry| entry.at)
+                .cmp(&a.completion.map(|entry| entry.at))
+                .then_with(|| a.path.cmp(&b.path))
         });
         files
     }
@@ -276,7 +293,19 @@ async fn download<P: DownloadProvider>(
             TransferEvent::Progress(progress) => (progress, false, None),
             TransferEvent::Finished(progress, failure) => (progress, true, failure),
         };
-        if let Some(row) = queue.status.write().await.file_mut(&file.id) {
+        if finished
+            && matches!(
+                progress.status,
+                DownloadState::Complete | DownloadState::Existing
+            )
+        {
+            let reason = if progress.status == DownloadState::Complete {
+                CompletionReason::Downloaded
+            } else {
+                CompletionReason::AlreadyLocal
+            };
+            queue.archive(file, progress, reason).await?;
+        } else if let Some(row) = queue.status.write().await.file_mut(&file.id) {
             row.progress = progress;
             if finished {
                 row.last_failure = failure.or_else(|| {
@@ -342,17 +371,10 @@ async fn run<P: DownloadProvider>(
         });
         let mut next_scan;
         if let Some(queue) = &queue {
-            {
-                let mut snapshot = status.write().await;
-                if snapshot.account != queue.session.account() {
-                    snapshot.files.clear();
-                } else {
-                    snapshot
-                        .files
-                        .retain(|file| queue.session.contains(&file.path));
-                }
-            }
-            let mut scan_result = queue.scan(&mut requests, false).await;
+            let mut scan_result = match queue.prepare_account().await {
+                Ok(()) => queue.scan(&mut requests, false).await,
+                Err(error) => Err(error),
+            };
             next_scan = schedule_scan(status, interval).await;
             while scan_result.is_ok() && !settings.has_changed().unwrap_or(true) {
                 while let Ok(request) = requests.try_recv() {

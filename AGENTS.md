@@ -22,10 +22,12 @@ The scheduler uses provider, account, remote ID, and path to identify a task. A 
 - Pause a queued task without stopping another transfer. Pause an active task by saving its disposition in SQLite before stopping its transfer. Keep its partial data and resume information.
 - Resume a paused task by clearing its saved disposition and putting it back in the queue. Reuse local progress when the provider supports resume.
 - Remove a task by saving a removal disposition. Exclude that identity from later scans and after a service restart. Keep its local files, including partial data.
-- Reconcile the queue after each successful scan. If a cloud file disappeared, remove its task even if it is paused, failed, or complete. Stop its transfer if it was active. Continue scanning during long transfers.
+- Reconcile the queue after each complete scan. Archive a known task if its cloud file disappeared. Record the remote deletion reason and retain any saved byte count. If the provider lists the same file ID at another path, record the move. Stop the transfer if it was active. Continue scanning during long transfers.
 - Keep the last byte count while the task waits for a retry. Keep the last failure reason until another attempt succeeds or reports a different failure. Use a structured failure reason. Keep raw provider output out of the API.
 - Show the next scan time for a waiting task. A retry requires a successful full scan and an available transfer slot. Keep the current round free to finish its other tasks.
 - Keep the prior queue on a failed scan. Do not interpret a connection problem as a cloud deletion. On an account or scope change, prevent stale tasks from mutating the new cloud scope.
+
+Record observed tasks in SQLite before starting downloads. Move each finished task to history after its outcome is saved. Keep archived identities out of the active queue. Preserve the completion reason after a successful download, even if the cloud original is recycled later.
 
 ## Cloud recycling
 
@@ -41,7 +43,7 @@ BaiduPCS-Go v4.0.2 provides rounded sizes in its detailed directory listing and 
 
 ## Web and tests
 
-Use the authenticated `POST /api/v1/downloads/status` and `POST /api/v1/downloads/update-download` endpoints for all providers. The status response contains provider phases, removal policy, and task rows. Each action sends the provider ID, opaque task ID, and action. A removal also sends the policy the user saw. Reject a stale policy and an unknown task.
+Use the authenticated `POST /api/v1/downloads/status` and `POST /api/v1/downloads/update-download` endpoints for all providers. The status response contains provider phases, removal policy, and active task rows. Set `include_completed` to include archived rows for each connected account. Completed rows are read-only. Keep the default view on active tasks. Each action sends the provider ID, opaque task ID, and action. A removal also sends the policy the user saw. Reject a stale policy and an unknown task.
 
 Keep provider configuration endpoints separate. Keep the shared table, column resizing, action buttons, and translations reusable. Place the action column directly after status. Show a size and 0% progress for queued rows with no bytes saved. Read local checkpoints through the adapter when available. Label local file sizes that lack verification. Show pause or resume where applicable and use a cross for removal. Show cloud recycling errors without hiding the paused task.
 

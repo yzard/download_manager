@@ -223,6 +223,19 @@ async fn one_shared_queue_pauses_resumes_and_reconciles_external_removals() {
     assert!(action(&sender, b, QueueAction::Remove, true).await.is_ok());
     assert_eq!(cloud.0.lock().unwrap().recycled, ["/b"]);
     assert!(status.read().await.files().is_empty());
+    let history = status.read().await.completed_files();
+    assert_eq!(
+        history
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/a", "/b"]
+    );
+    assert!(
+        history
+            .iter()
+            .all(|row| row.completion.unwrap().reason == CompletionReason::RemoteDeleted)
+    );
     assert_eq!(cloud.0.lock().unwrap().files, [("/c", 30)]);
     worker.abort();
 }
@@ -290,4 +303,82 @@ async fn retry_keeps_the_last_progress_and_error_until_the_next_attempt() {
     assert_eq!(row.progress.downloaded, 4);
     assert_eq!(row.progress.total, Some(10));
     assert_eq!(row.last_failure, Some(FailureReason::TlsHandshakeTimeout));
+}
+
+#[tokio::test]
+async fn completed_history_is_loaded_after_restart_and_missing_files_are_archived() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("history.sqlite3");
+    let provider = TestProvider(Arc::new(Mutex::new(TestCloud {
+        files: vec![("/downloaded", 10), ("/disappeared", 20)],
+        started: Vec::new(),
+        stopped: Vec::new(),
+        recycled: Vec::new(),
+        list_fails: false,
+        recycle_fails: false,
+    })));
+    let (_sender, settings) = watch::channel(Settings {
+        baidu: Default::default(),
+        general: Default::default(),
+    });
+    let status = RwLock::new(Snapshot::default());
+    let queue = Queue::<TestProvider> {
+        session: &provider,
+        settings: &settings,
+        status: &status,
+        interval: Duration::from_secs(60),
+        database: &database,
+    };
+    queue
+        .reconcile(provider.list().await.unwrap(), false)
+        .await
+        .unwrap();
+    let file = status.read().await.files()[0].clone();
+    queue
+        .archive(&file, file.progress, CompletionReason::Downloaded)
+        .await
+        .unwrap();
+
+    let restarted = RwLock::new(Snapshot::default());
+    let queue = Queue::<TestProvider> {
+        status: &restarted,
+        ..queue
+    };
+    queue.prepare_account().await.unwrap();
+    assert_eq!(
+        restarted.read().await.completed_files()[0].path,
+        "/downloaded"
+    );
+
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .files
+        .retain(|(path, _)| *path != "/disappeared");
+    queue
+        .reconcile(provider.list().await.unwrap(), false)
+        .await
+        .unwrap();
+    let snapshot = restarted.read().await;
+    assert!(snapshot.files().is_empty());
+    let history = snapshot.completed_files();
+    let gone = history
+        .iter()
+        .find(|row| row.path == "/disappeared")
+        .unwrap();
+    let completed = history
+        .iter()
+        .find(|row| row.path == "/downloaded")
+        .unwrap();
+    assert_eq!(
+        gone.completion.unwrap().reason,
+        CompletionReason::RemoteDeleted
+    );
+    assert_eq!(gone.progress.downloaded, 0);
+    assert_eq!(
+        completed.completion.unwrap().reason,
+        CompletionReason::Downloaded
+    );
+    assert_eq!(completed.progress.downloaded, 10);
 }

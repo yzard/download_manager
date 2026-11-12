@@ -9,6 +9,7 @@ fn parses_progress_and_rejects_metadata_for_a_replaced_file() {
         remote_id: "123".to_owned(),
         last_failure: None,
         local_progress: None,
+        completion: None,
         progress: TransferProgress {
             status: DownloadState::Active,
             downloaded: 0,
