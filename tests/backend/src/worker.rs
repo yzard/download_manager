@@ -339,6 +339,20 @@ async fn completed_history_is_loaded_after_restart_and_missing_files_are_archive
         .await
         .unwrap();
 
+    {
+        let mut snapshot = status.write().await;
+        let file = snapshot
+            .files
+            .iter_mut()
+            .find(|file| file.path == "/disappeared")
+            .unwrap();
+        file.progress.downloaded = 7;
+    }
+    queue
+        .reconcile(provider.list().await.unwrap(), true)
+        .await
+        .unwrap();
+
     let restarted = RwLock::new(Snapshot::default());
     let queue = Queue::<TestProvider> {
         status: &restarted,
@@ -375,7 +389,7 @@ async fn completed_history_is_loaded_after_restart_and_missing_files_are_archive
         gone.completion.unwrap().reason,
         CompletionReason::RemoteDeleted
     );
-    assert_eq!(gone.progress.downloaded, 0);
+    assert_eq!(gone.progress.downloaded, 7);
     assert_eq!(
         completed.completion.unwrap().reason,
         CompletionReason::Downloaded
