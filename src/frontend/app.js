@@ -334,21 +334,34 @@ function renderFile(file, row = document.createElement("tr")) {
   const active = file.status === "active" || file.status === "retrying";
   const paused = file.status === "paused";
   const complete = file.status === "complete" || file.status === "existing";
-  const savedProgress = file.downloaded > 0 && (paused || file.status === "failed" || file.status === "queued");
+  const local = !active && !complete ? file.local_progress : null;
+  const useLocal = local && (local.kind === "checkpoint"
+    ? local.bytes >= file.downloaded
+    : file.downloaded === 0);
+  const total = useLocal ? local.total : file.total;
+  const downloaded = useLocal ? local.bytes : file.downloaded;
   progress.replaceChildren();
-  if (active || complete || savedProgress) {
-    const percent = complete ? 100 : (file.total > 0 ? Math.min(100, 100 * file.downloaded / file.total) : null);
+  if (active || complete || Number.isFinite(total)) {
+    const percent = complete ? 100 : total > 0 ? Math.min(100, 100 * downloaded / total) : total === 0 ? 0 : null;
     const bar = document.createElement("progress");
     bar.max = 100;
     bar.setAttribute("aria-label", text("fileProgress").replace("{file}", () => name.textContent));
     if (percent !== null) bar.value = percent;
     const value = document.createElement("span");
-    value.textContent = percent === null ? text("preparing") : percent.toFixed(1) + "%";
+    value.textContent = percent === null ? text("preparing") : (percent === 0 ? "0" : percent.toFixed(1)) + "%";
     progress.append(bar, value);
-    if ((active || savedProgress) && file.total > 0) {
+    if (!complete && Number.isFinite(total)) {
       const bytes = document.createElement("small");
-      bytes.textContent = formatBytes(file.downloaded) + " / " + formatBytes(file.total);
-      progress.append(bytes);
+      bytes.textContent = formatBytes(downloaded) + " / " + formatBytes(total);
+      if (useLocal && local.kind === "local_file") {
+        bytes.title = text("unverifiedLocalProgress");
+        bytes.setAttribute("aria-label", bytes.textContent + " · " + bytes.title);
+        const note = document.createElement("small");
+        note.textContent = bytes.title;
+        progress.append(bytes, note);
+      } else {
+        progress.append(bytes);
+      }
     }
   } else {
     progress.textContent = "—";

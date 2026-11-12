@@ -22,6 +22,21 @@ pub struct RemoteFile {
     pub id: String,
     pub path: String,
     pub size: u64,
+    pub local_progress: Option<LocalProgress>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LocalProgress {
+    pub bytes: u64,
+    pub total: u64,
+    pub kind: LocalProgressKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalProgressKind {
+    Checkpoint,
+    LocalFile,
 }
 
 pub trait DownloadProvider: Send + Sync + 'static {
@@ -145,6 +160,7 @@ pub struct Download {
     #[serde(flatten)]
     pub progress: TransferProgress,
     pub last_failure: Option<FailureReason>,
+    pub local_progress: Option<LocalProgress>,
     #[serde(skip)]
     pub remote_id: String,
 }

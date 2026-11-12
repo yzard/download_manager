@@ -133,6 +133,7 @@ impl<P: DownloadProvider> Queue<'_, P> {
                     remote_id: file.id,
                     progress,
                     last_failure: prior.and_then(|row| row.last_failure),
+                    local_progress: file.local_progress,
                 })
             })
             .collect();

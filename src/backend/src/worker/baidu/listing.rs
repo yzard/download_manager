@@ -157,6 +157,7 @@ pub(super) async fn discover(monitor: &str) -> io::Result<Vec<RemoteFile>> {
                     id: entry.file_id.to_string(),
                     path,
                     size,
+                    local_progress: None,
                 });
             } else {
                 pending.push(path);

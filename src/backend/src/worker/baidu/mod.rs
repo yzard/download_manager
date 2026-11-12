@@ -1,5 +1,6 @@
 mod cleanup;
 mod listing;
+mod local_progress;
 
 use super::{
     Download, DownloadProvider, DownloadSession, DownloadState, DownloadTransfer, FailureReason,
@@ -176,7 +177,20 @@ impl DownloadSession for BaiduSession {
     }
 
     async fn list(&self) -> io::Result<Vec<RemoteFile>> {
-        listing::discover(&self.current.baidu.monitor_directory).await
+        let monitor = &self.current.baidu.monitor_directory;
+        let mut files = listing::discover(monitor).await?;
+        let monitor = monitor.clone();
+        let destination = self.current.general.download_directory.clone();
+        tokio::task::spawn_blocking(move || {
+            for file in &mut files {
+                if let Some(path) = cleanup::expected_path(&destination, &monitor, &file.path) {
+                    file.local_progress = local_progress::read(&path, file.size);
+                }
+            }
+            files
+        })
+        .await
+        .map_err(io::Error::other)
     }
 
     async fn start(&self, file: &Download) -> io::Result<BaiduTransfer> {

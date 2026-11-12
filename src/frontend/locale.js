@@ -71,6 +71,7 @@ const messages = {
   noDownloads: ["当前没有下载任务。", "There are no downloads."],
   starting: ["正在启动", "Starting"],
   preparing: ["准备中", "Preparing"],
+  unverifiedLocalProgress: ["本地文件大小，未校验", "Local file size, unverified"],
   fileProgress: ["{file} 的下载进度", "Download progress for {file}"],
   phase_setup: ["等待设置", "Waiting for setup"],
   phase_checking: ["检查网盘目录", "Checking the cloud folder"],

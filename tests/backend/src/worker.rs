@@ -62,6 +62,7 @@ impl DownloadSession for TestProvider {
                 id: path.to_string(),
                 path: path.to_string(),
                 size: *size,
+                local_progress: None,
             })
             .collect())
     }

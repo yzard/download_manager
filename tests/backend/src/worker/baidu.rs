@@ -8,6 +8,7 @@ fn parses_progress_and_rejects_metadata_for_a_replaced_file() {
         path: "/NAS下载/新文件.txt".to_owned(),
         remote_id: "123".to_owned(),
         last_failure: None,
+        local_progress: None,
         progress: TransferProgress {
             status: DownloadState::Active,
             downloaded: 0,
