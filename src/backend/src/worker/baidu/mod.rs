@@ -176,10 +176,16 @@ impl DownloadSession for BaiduSession {
         self.local_path(path).is_some()
     }
 
+    fn listed_size(&self, bytes: u64) -> u64 {
+        listing::displayed_size(bytes)
+    }
+
     async fn list(&self) -> io::Result<Vec<RemoteFile>> {
-        let monitor = &self.current.baidu.monitor_directory;
-        let mut files = listing::discover(monitor).await?;
-        let monitor = monitor.clone();
+        listing::discover(&self.current.baidu.monitor_directory).await
+    }
+
+    async fn read_local_progress(&self, mut files: Vec<RemoteFile>) -> io::Result<Vec<RemoteFile>> {
+        let monitor = self.current.baidu.monitor_directory.clone();
         let destination = self.current.general.download_directory.clone();
         tokio::task::spawn_blocking(move || {
             for file in &mut files {
@@ -206,19 +212,25 @@ impl DownloadSession for BaiduSession {
             download_directory: destination.clone(),
             ..self.current.general.clone()
         };
-        tokio::task::spawn_blocking(move || {
+        let listed_size = self.listed_size(file.source_size);
+        let (local_size, checkpoint) = tokio::task::spawn_blocking(move || {
             local.prepare_destination()?;
             let mut marker = output.as_os_str().to_owned();
             marker.push(cleanup::RESUME_SUFFIX);
-            for path in [output.as_os_str(), marker.as_os_str()] {
+            let mut lengths = [None, None];
+            for (path, length) in [output.as_os_str(), marker.as_os_str()]
+                .into_iter()
+                .zip(&mut lengths)
+            {
                 match fs::symlink_metadata(path) {
-                    Ok(metadata) if metadata.is_file() => {}
+                    Ok(metadata) if metadata.is_file() => *length = Some(metadata.len()),
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Ok(_) => return Err(io::Error::other("Download path is not a regular file")),
                     Err(error) => return Err(error),
                 }
             }
-            Ok(())
+            let checkpoint = lengths[1].map(|_| local_progress::read(&output, listed_size));
+            Ok((lengths[0], checkpoint))
         })
         .await
         .map_err(io::Error::other)??;
@@ -238,8 +250,16 @@ impl DownloadSession for BaiduSession {
             }
             result => result?,
         };
-        if cloud.fs_id.to_string() != file.remote_id {
+        if cloud.fs_id.to_string() != file.remote_id || self.listed_size(cloud.size) != listed_size
+        {
             return Err(io::Error::other(FailureReason::FileChanged));
+        }
+        let size_mismatch = match checkpoint {
+            Some(progress) => progress.is_some_and(|progress| progress.total != cloud.size),
+            None => local_size.is_some_and(|size| size > 0 && size != cloud.size),
+        };
+        if size_mismatch {
+            return Err(io::Error::other(FailureReason::LocalSizeMismatch));
         }
         let mut child = Command::new("/bin/busybox")
             .args([
@@ -287,6 +307,7 @@ impl DownloadSession for BaiduSession {
             Err(error) => return Err(error),
         };
         if cloud.fs_id.to_string() != file.remote_id
+            || self.listed_size(cloud.size) != self.listed_size(file.source_size)
             || active_account().await?.to_string() != self.account
             || !self.current(&settings.borrow())
             || !Baidu::recycle_on_remove(&settings.borrow())

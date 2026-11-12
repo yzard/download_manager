@@ -6,7 +6,7 @@ use crate::settings::{BaiduSettings, GeneralSettings, Language};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 const LOAD_BAIDU: &str = "
 SELECT bduss
@@ -75,7 +75,7 @@ fn connect(path: &Path) -> io::Result<Connection> {
         let version = schema_version(&transaction)?;
         match version {
             0 => transaction.execute_batch(include_str!("../schema.sql")),
-            1..=7 => {
+            1..=8 => {
                 for (target, migration) in [
                     (
                         2,
@@ -90,6 +90,10 @@ fn connect(path: &Path) -> io::Result<Connection> {
                     ),
                     (7, include_str!("../migrations/007_download_queue.sql")),
                     (8, include_str!("../migrations/008_download_records.sql")),
+                    (
+                        9,
+                        include_str!("../migrations/009_download_record_sizes.sql"),
+                    ),
                 ] {
                     if version < target {
                         transaction

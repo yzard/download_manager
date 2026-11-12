@@ -336,7 +336,7 @@ function renderFile(file, row = document.createElement("tr")) {
   const active = file.status === "active" || file.status === "retrying";
   const paused = file.status === "paused";
   const archived = Boolean(file.completion);
-  const remoteGone = archived && ["remote_deleted", "remote_moved"].includes(file.completion.reason);
+  const remoteGone = archived && ["remote_deleted", "remote_moved", "remote_replaced"].includes(file.completion.reason);
   const complete = (file.status === "complete" || file.status === "existing") && !remoteGone;
   const local = !active && !complete ? file.local_progress : null;
   const useLocal = local && (local.kind === "checkpoint"
@@ -374,8 +374,10 @@ function renderFile(file, row = document.createElement("tr")) {
   speed.textContent = active ? formatBytes(file.speed) + "/s" : "—";
   speed.title = speed.textContent;
   badge.className = "download-status";
-  badge.textContent = text("state_" + file.status) || file.status;
-  if (archived && file.completion.reason !== "downloaded") {
+  badge.textContent = archived && !remoteGone
+    ? text("state_downloaded")
+    : text("state_" + file.status) || file.status;
+  if (remoteGone) {
     showStatusDetail(badge, text("completion_" + file.completion.reason));
   }
   const queue = downloadStatus.queues.find((entry) => entry.provider === file.provider);

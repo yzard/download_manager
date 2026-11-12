@@ -122,6 +122,17 @@ fn parse_directory(output: &str, directory: &str) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+pub(super) fn displayed_size(bytes: u64) -> u64 {
+    // Match the two-decimal size shown in the pinned CLI's detailed listing.
+    let power = (bytes.checked_ilog2().unwrap_or(0) / 10).min(5);
+    if power == 0 {
+        return bytes;
+    }
+    let unit = 1024_f64.powi(power as i32);
+    let display = format!("{:.2}", bytes as f64 / unit);
+    (display.parse::<f64>().expect("formatted size is numeric") * unit).round() as u64
+}
+
 pub(super) async fn discover(monitor: &str) -> io::Result<Vec<RemoteFile>> {
     let root = Path::new(monitor)
         .components()

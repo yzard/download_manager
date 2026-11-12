@@ -62,7 +62,12 @@ pub trait DownloadSession: Send + Sync {
     fn account(&self) -> &str;
     fn current(&self, settings: &Settings) -> bool;
     fn contains(&self, path: &str) -> bool;
+    fn listed_size(&self, bytes: u64) -> u64;
     fn list(&self) -> impl Future<Output = io::Result<Vec<RemoteFile>>> + Send;
+    fn read_local_progress(
+        &self,
+        files: Vec<RemoteFile>,
+    ) -> impl Future<Output = io::Result<Vec<RemoteFile>>> + Send;
     fn start(&self, file: &Download) -> impl Future<Output = io::Result<Self::Transfer>> + Send;
     fn recycle(
         &self,
@@ -97,6 +102,7 @@ pub enum FailureReason {
     FileChanged,
     PermissionDenied,
     ChecksumMismatch,
+    LocalSizeMismatch,
     LoginRequired,
     ProviderError(i32),
     NoCompletion,
@@ -168,6 +174,8 @@ pub struct Download {
     pub completion: Option<Completion>,
     #[serde(skip)]
     pub remote_id: String,
+    #[serde(skip)]
+    pub source_size: u64,
 }
 
 #[derive(Default)]

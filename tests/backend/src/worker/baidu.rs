@@ -6,6 +6,7 @@ fn parses_progress_and_rejects_metadata_for_a_replaced_file() {
         id: "fixture".to_owned(),
         provider: "baidu",
         path: "/NAS下载/新文件.txt".to_owned(),
+        source_size: 230_000_000,
         remote_id: "123".to_owned(),
         last_failure: None,
         local_progress: None,

@@ -7,7 +7,7 @@ The shared scheduler, task state, and provider traits are in `src/backend/src/wo
 - Implement `DownloadProvider`, `DownloadSession`, and `DownloadTransfer`. Give the provider a stable, unique ID.
 - Return a stable account ID from the connected session. Keep credentials in provider configuration and keep them out of API responses and logs.
 - Implement `current` to compare the account credentials, monitored scope, and local destination with the latest configuration. Use `contains` to reject tasks outside the monitored scope. Check the scope again just before a cloud mutation.
-- Return a complete list of files from `list`. Read all pages and subdirectories in the configured scope. Each record contains an opaque remote file ID, a canonical remote path, and a size in bytes.
+- Return a complete list of files from `list`. Read all pages and subdirectories in the configured scope. Each record contains an opaque remote file ID, a canonical remote path, and a size in bytes. Implement `listed_size` to convert an exact byte count to the representation used by `list`. Use `read_local_progress` only for files selected by the scheduler.
 - Publish the whole list before starting a transfer. Include zero-byte files. Directories do not become tasks. If the upstream list rounds sizes, document its precision and replace the estimate when exact metadata is available.
 - Return an error for a failed or incomplete scan. This includes timeouts, authorization failures, malformed output, missing pages, and duplicate paths. Return an empty list only when the provider confirms that the scope is empty or absent.
 - Start exactly one file per transfer. Verify the remote identity before starting. Preserve the configured local destination and nested paths. Reject paths outside the download root, traversal, and ambiguous path syntax. Pass exact paths to tools that support patterns.
@@ -17,7 +17,7 @@ The shared scheduler, task state, and provider traits are in `src/backend/src/wo
 
 ## Queue behavior
 
-The scheduler uses provider, account, remote ID, and path to identify a task. A replacement file with a new ID receives a new task. A rename creates a task at the new path. The scheduler sorts a new scan by size and then path, and runs one transfer at a time per provider.
+The scheduler identifies a task by provider, account, remote ID, full path, and listed size. A replacement or rename can create a new task if it does not match a downloaded record. The scheduler sorts a new scan by size and then path, and runs one transfer at a time per provider.
 
 - Pause a queued task without stopping another transfer. Pause an active task by saving its disposition in SQLite before stopping its transfer. Keep its partial data and resume information.
 - Resume a paused task by clearing its saved disposition and putting it back in the queue. Reuse local progress when the provider supports resume.
@@ -27,7 +27,7 @@ The scheduler uses provider, account, remote ID, and path to identify a task. A 
 - Show the next scan time for a waiting task. A retry requires a successful full scan and an available transfer slot. Keep the current round free to finish its other tasks.
 - Keep the prior queue on a failed scan. Do not interpret a connection problem as a cloud deletion. On an account or scope change, prevent stale tasks from mutating the new cloud scope.
 
-Record observed tasks in SQLite before starting downloads. Move each finished task to history after its outcome is saved. Keep archived identities out of the active queue. Preserve the completion reason after a successful download, even if the cloud original is recycled later.
+Record observed tasks in SQLite before starting downloads. Move each finished task to history after its outcome is saved. Exclude archived identities before reading local progress or requesting file metadata. For downloaded files, use the provider, account, full cloud path, and listed size to match history. Compare sizes at the precision supported by the provider's directory listing. A different size at the same path creates a new task. Keep the provider file ID for queue actions and remote mutations. Archive an unfinished task as replaced if its path now holds a different file. A directory scan still finds new files. Preserve the completion reason after a successful download, even if the cloud original is recycled later.
 
 ## Cloud recycling
 

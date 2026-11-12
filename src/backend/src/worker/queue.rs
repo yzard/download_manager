@@ -50,12 +50,13 @@ pub(super) struct Queue<'a, P: DownloadProvider> {
     pub database: &'a Path,
 }
 
-fn task_id(provider: &str, account: &str, file: &str, path: &str) -> String {
+fn task_id(provider: &str, account: &str, file: &str, path: &str, size: u64) -> String {
     let mut hash = Sha256::new();
     for part in [provider, account, file, path] {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
     }
+    hash.update(size.to_be_bytes());
     format!("{:x}", hash.finalize())
 }
 
@@ -72,13 +73,15 @@ fn history_file(
     account: &str,
     file_id: String,
     path: String,
+    source_size: u64,
     record: Record,
 ) -> Download {
     Download {
-        id: task_id(provider, account, &file_id, &path),
+        id: task_id(provider, account, &file_id, &path, source_size),
         provider,
         path,
         remote_id: file_id,
+        source_size,
         progress: TransferProgress {
             status: DownloadState::Complete,
             downloaded: record.downloaded,
@@ -146,13 +149,13 @@ impl<P: DownloadProvider> Queue<'_, P> {
         mut files: Vec<RemoteFile>,
         preserve: bool,
     ) -> io::Result<()> {
+        files.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.path.cmp(&b.path)));
         let mut paths = HashSet::with_capacity(files.len());
         if files.iter().any(|file| {
             file.id.is_empty() || !self.session.contains(&file.path) || !paths.insert(&file.path)
         }) {
             return Err(io::Error::other("Invalid or duplicate cloud file identity"));
         }
-        files.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.path.cmp(&b.path)));
         let account = self.session.account().to_owned();
         let database = self.database.to_owned();
         let (dispositions, mut records) = tokio::task::spawn_blocking({
@@ -176,26 +179,51 @@ impl<P: DownloadProvider> Queue<'_, P> {
             .collect();
         let seen: HashSet<_> = files
             .iter()
-            .map(|file| (file.id.clone(), file.path.clone()))
+            .map(|file| {
+                (
+                    file.id.as_str(),
+                    file.path.as_str(),
+                    self.session.listed_size(file.size),
+                )
+            })
             .collect();
-        let seen_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
+        let seen_ids: HashSet<_> = files.iter().map(|file| file.id.as_str()).collect();
+        let mut completed_files = HashSet::new();
+        let mut downloaded_paths = HashSet::new();
+        let mut pending_sizes = HashMap::new();
         let mut changes = Records::new();
-        for (key, record) in &records {
-            if record.completion.is_some()
-                || seen.contains(key)
-                || !self.session.contains(&key.1)
-                || dispositions.get(key) == Some(&Disposition::Removed)
+        for ((file_id, path, source_size), record) in &records {
+            let listed_size = self.session.listed_size(*source_size);
+            let key = (file_id.as_str(), path.as_str(), listed_size);
+            if let Some(completion) = record.completion {
+                completed_files.insert(key);
+                if matches!(
+                    completion.reason,
+                    CompletionReason::Downloaded | CompletionReason::AlreadyLocal
+                ) {
+                    downloaded_paths.insert((path.as_str(), listed_size));
+                }
+                continue;
+            }
+            if seen.contains(&key) {
+                pending_sizes.insert(key, *source_size);
+                continue;
+            }
+            if !self.session.contains(path)
+                || dispositions.get(&(file_id.clone(), path.clone())) == Some(&Disposition::Removed)
             {
                 continue;
             }
-            let prior = old.get(&task_id(P::ID, &account, &key.0, &key.1));
-            let reason = if seen_ids.contains(&key.0) {
+            let prior = old.get(&task_id(P::ID, &account, file_id, path, *source_size));
+            let reason = if paths.contains(path) {
+                CompletionReason::RemoteReplaced
+            } else if seen_ids.contains(file_id.as_str()) {
                 CompletionReason::RemoteMoved
             } else {
                 CompletionReason::RemoteDeleted
             };
             changes.insert(
-                key.clone(),
+                (file_id.clone(), path.clone(), *source_size),
                 Record {
                     total: record.total,
                     downloaded: prior
@@ -209,18 +237,31 @@ impl<P: DownloadProvider> Queue<'_, P> {
             );
         }
 
-        let mut next = Vec::new();
-        for file in files {
-            let id = task_id(P::ID, &account, &file.id, &file.path);
-            let prior = old.get(&id);
+        files.retain(|file| {
             let key = (file.id.clone(), file.path.clone());
-            let disposition = dispositions.get(&key);
+            let listed_size = self.session.listed_size(file.size);
+            dispositions.get(&key) != Some(&Disposition::Removed)
+                && !completed_files.contains(&(file.id.as_str(), file.path.as_str(), listed_size))
+                && !downloaded_paths.contains(&(file.path.as_str(), listed_size))
+        });
+        let files = if files.is_empty() {
+            files
+        } else {
+            self.session.read_local_progress(files).await?
+        };
+
+        let mut next = Vec::with_capacity(files.len());
+        for file in files {
+            let listed_size = self.session.listed_size(file.size);
+            let source_size = pending_sizes
+                .get(&(file.id.as_str(), file.path.as_str(), listed_size))
+                .copied()
+                .unwrap_or(file.size);
+            let id = task_id(P::ID, &account, &file.id, &file.path, source_size);
+            let prior = old.get(&id);
+            let disposition = dispositions.get(&(file.id.clone(), file.path.clone()));
+            let key = (file.id.clone(), file.path.clone(), source_size);
             let record = records.get(&key);
-            if disposition == Some(&Disposition::Removed)
-                || record.is_some_and(|record| record.completion.is_some())
-            {
-                continue;
-            }
             let downloaded = prior.map_or_else(
                 || record.map_or(0, |record| record.downloaded),
                 |row| row.progress.downloaded,
@@ -254,6 +295,7 @@ impl<P: DownloadProvider> Queue<'_, P> {
                 provider: P::ID,
                 path: file.path,
                 remote_id: file.id,
+                source_size,
                 progress,
                 last_failure: prior.and_then(|row| row.last_failure),
                 local_progress: file.local_progress,
@@ -272,10 +314,10 @@ impl<P: DownloadProvider> Queue<'_, P> {
     fn history(account: &str, records: Records) -> Vec<Download> {
         records
             .into_iter()
-            .filter_map(|((id, path), record)| {
+            .filter_map(|((id, path, size), record)| {
                 record
                     .completion
-                    .map(|_| history_file(P::ID, account, id, path, record))
+                    .map(|_| history_file(P::ID, account, id, path, size, record))
             })
             .collect()
     }
@@ -308,9 +350,9 @@ impl<P: DownloadProvider> Queue<'_, P> {
             total,
             downloaded: match reason {
                 CompletionReason::Downloaded | CompletionReason::AlreadyLocal => total,
-                CompletionReason::RemoteDeleted | CompletionReason::RemoteMoved => {
-                    saved_bytes(file).min(total)
-                }
+                CompletionReason::RemoteDeleted
+                | CompletionReason::RemoteMoved
+                | CompletionReason::RemoteReplaced => saved_bytes(file).min(total),
             },
             completion: Some(Completion {
                 reason,
@@ -318,7 +360,7 @@ impl<P: DownloadProvider> Queue<'_, P> {
             }),
         };
         self.save_records(&Records::from([(
-            (file.remote_id.clone(), file.path.clone()),
+            (file.remote_id.clone(), file.path.clone(), file.source_size),
             record,
         )]))
         .await?;
@@ -329,6 +371,7 @@ impl<P: DownloadProvider> Queue<'_, P> {
             self.session.account(),
             file.remote_id.clone(),
             file.path.clone(),
+            file.source_size,
             record,
         ));
         Ok(())

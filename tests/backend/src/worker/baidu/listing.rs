@@ -35,3 +35,12 @@ fn escapes_patterns_without_accepting_path_traversal() {
     assert!(literal_path("/NAS下载/a\nb").is_none());
     assert!(literal_path("/NAS下载/a\\b").is_none());
 }
+
+#[test]
+fn compares_exact_sizes_at_directory_listing_precision() {
+    assert_eq!(Some(displayed_size(230_133_000)), human_bytes("219.47MB"));
+    assert_eq!(Some(displayed_size(1_048_575)), human_bytes("1024.00KB"));
+    assert_eq!(displayed_size(1_048_575), displayed_size(1_048_576));
+    assert_ne!(displayed_size(230_133_000), displayed_size(231_133_000));
+    assert_eq!(displayed_size(1023), 1023);
+}

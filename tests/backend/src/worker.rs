@@ -11,6 +11,7 @@ struct TestProvider(Arc<Mutex<TestCloud>>);
 struct TestCloud {
     files: Vec<(&'static str, u64)>,
     started: Vec<String>,
+    inspected_local: Vec<String>,
     stopped: Vec<String>,
     recycled: Vec<String>,
     list_fails: bool,
@@ -50,6 +51,9 @@ impl DownloadSession for TestProvider {
     fn contains(&self, path: &str) -> bool {
         path.starts_with('/')
     }
+    fn listed_size(&self, bytes: u64) -> u64 {
+        bytes
+    }
     async fn list(&self) -> io::Result<Vec<RemoteFile>> {
         let state = self.0.lock().unwrap();
         if state.list_fails {
@@ -66,6 +70,15 @@ impl DownloadSession for TestProvider {
             })
             .collect())
     }
+    async fn read_local_progress(&self, files: Vec<RemoteFile>) -> io::Result<Vec<RemoteFile>> {
+        self.0
+            .lock()
+            .unwrap()
+            .inspected_local
+            .extend(files.iter().map(|file| file.path.clone()));
+        Ok(files)
+    }
+
     async fn start(&self, file: &Download) -> io::Result<TestTransfer> {
         self.0.lock().unwrap().started.push(file.path.clone());
         Ok(TestTransfer {
@@ -142,6 +155,7 @@ async fn one_shared_queue_pauses_resumes_and_reconciles_external_removals() {
     let cloud = TestProvider(Arc::new(Mutex::new(TestCloud {
         files: vec![("/a", 10), ("/b", 20), ("/c", 30)],
         started: Vec::new(),
+        inspected_local: Vec::new(),
         stopped: Vec::new(),
         recycled: Vec::new(),
         list_fails: false,
@@ -247,6 +261,7 @@ async fn retry_keeps_the_last_progress_and_error_until_the_next_attempt() {
     let provider = TestProvider(Arc::new(Mutex::new(TestCloud {
         files: vec![("/retry", 10)],
         started: Vec::new(),
+        inspected_local: Vec::new(),
         stopped: Vec::new(),
         recycled: Vec::new(),
         list_fails: false,
@@ -312,6 +327,7 @@ async fn completed_history_is_loaded_after_restart_and_missing_files_are_archive
     let provider = TestProvider(Arc::new(Mutex::new(TestCloud {
         files: vec![("/downloaded", 10), ("/disappeared", 20)],
         started: Vec::new(),
+        inspected_local: Vec::new(),
         stopped: Vec::new(),
         recycled: Vec::new(),
         list_fails: false,
@@ -348,10 +364,12 @@ async fn completed_history_is_loaded_after_restart_and_missing_files_are_archive
             .unwrap();
         file.progress.downloaded = 7;
     }
+    provider.0.lock().unwrap().inspected_local.clear();
     queue
         .reconcile(provider.list().await.unwrap(), true)
         .await
         .unwrap();
+    assert_eq!(provider.0.lock().unwrap().inspected_local, ["/disappeared"]);
 
     let restarted = RwLock::new(Snapshot::default());
     let queue = Queue::<TestProvider> {
@@ -364,16 +382,14 @@ async fn completed_history_is_loaded_after_restart_and_missing_files_are_archive
         "/downloaded"
     );
 
-    provider
-        .0
-        .lock()
-        .unwrap()
-        .files
-        .retain(|(path, _)| *path != "/disappeared");
-    queue
-        .reconcile(provider.list().await.unwrap(), false)
-        .await
-        .unwrap();
+    {
+        let mut cloud = provider.0.lock().unwrap();
+        cloud.inspected_local.clear();
+        cloud.files.retain(|(path, _)| *path != "/disappeared");
+    }
+    let mut listed = provider.list().await.unwrap();
+    listed[0].id = "new-cloud-id".to_owned();
+    queue.reconcile(listed, false).await.unwrap();
     let snapshot = restarted.read().await;
     assert!(snapshot.files().is_empty());
     let history = snapshot.completed_files();
@@ -390,9 +406,22 @@ async fn completed_history_is_loaded_after_restart_and_missing_files_are_archive
         CompletionReason::RemoteDeleted
     );
     assert_eq!(gone.progress.downloaded, 7);
+    assert!(provider.0.lock().unwrap().inspected_local.is_empty());
     assert_eq!(
         completed.completion.unwrap().reason,
         CompletionReason::Downloaded
     );
     assert_eq!(completed.progress.downloaded, 10);
+    drop(snapshot);
+
+    let mut listed = provider.list().await.unwrap();
+    listed[0].size = 15;
+    queue.reconcile(listed, true).await.unwrap();
+    let snapshot = restarted.read().await;
+    let replacement = &snapshot.files()[0];
+    assert_ne!(replacement.id, file.id);
+    assert_eq!(replacement.progress.total, Some(15));
+    assert_eq!(replacement.progress.downloaded, 0);
+    assert_eq!(snapshot.completed_files().len(), 2);
+    assert_eq!(provider.0.lock().unwrap().inspected_local, ["/downloaded"]);
 }
