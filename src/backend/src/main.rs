@@ -23,7 +23,6 @@ use std::{
     collections::BTreeMap,
     env,
     io::{self, Read},
-    net::SocketAddr,
     path::Path,
     sync::Arc,
 };
@@ -802,19 +801,10 @@ async fn main() -> io::Result<()> {
         Err(env::VarError::NotPresent) => web_access::AllowedHosts::default(),
         Err(error) => return Err(io::Error::other(error)),
     };
-    let allowed_hosts = match (env::var("WEB_HTTPS_HOST"), env::var("WEB_TRUSTED_PROXY")) {
-        (Ok(host), Ok(proxy)) => allowed_hosts.with_https(
-            &host,
-            proxy
-                .parse()
-                .map_err(|_| io::Error::other("WEB_TRUSTED_PROXY must be an IP address"))?,
-        )?,
-        (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => allowed_hosts,
-        _ => {
-            return Err(io::Error::other(
-                "Set WEB_HTTPS_HOST and WEB_TRUSTED_PROXY together",
-            ));
-        }
+    let allowed_hosts = match env::var("WEB_HTTPS_HOST") {
+        Ok(host) => allowed_hosts.with_https(&host)?,
+        Err(env::VarError::NotPresent) => allowed_hosts,
+        Err(error) => return Err(io::Error::other(error)),
     };
     let base_url_override = match env::var("BASE_URL") {
         Ok(value) => Some(value),
@@ -845,14 +835,11 @@ async fn main() -> io::Result<()> {
         listener.local_addr()?,
         allowed_hosts.base_url()
     );
-    let result = axum::serve(
-        listener,
-        app(state, allowed_hosts).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
-    })
-    .await;
+    let result = axum::serve(listener, app(state, allowed_hosts))
+        .with_graceful_shutdown(async move {
+            tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+        })
+        .await;
     worker.abort();
     let _ = worker.await;
     result

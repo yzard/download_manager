@@ -1,27 +1,16 @@
 use axum::{
-    extract::{ConnectInfo, Request, State},
+    extract::{Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header, uri::Authority},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::{
-    io,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Instant,
-};
+use std::{io, sync::Arc, time::Instant};
 
 #[derive(Clone, Default)]
 pub struct AllowedHosts {
     http: Arc<[Authority]>,
-    https: Option<TrustedHttps>,
+    https: Option<Authority>,
     base_url: Arc<str>,
-}
-
-#[derive(Clone)]
-struct TrustedHttps {
-    host: Authority,
-    proxy: IpAddr,
 }
 
 #[derive(Clone)]
@@ -67,13 +56,13 @@ impl AllowedHosts {
         &self.base_url
     }
 
-    pub fn with_https(mut self, host: &str, proxy: IpAddr) -> io::Result<Self> {
+    pub fn with_https(mut self, host: &str) -> io::Result<Self> {
         let host = host
             .parse::<Authority>()
             .ok()
             .filter(|host| !host.as_str().contains('@') && !host.host().is_empty())
             .ok_or_else(|| io::Error::other("WEB_HTTPS_HOST must contain an HTTPS authority"))?;
-        self.https = Some(TrustedHttps { host, proxy });
+        self.https = Some(host);
         Ok(self)
     }
 
@@ -104,6 +93,19 @@ fn same_origin(method: &Method, headers: &HeaderMap, host: &Authority, secure: b
             == Some(host.as_str())
 }
 
+fn is_https_forward(
+    configured_host: Option<&Authority>,
+    request_host: Option<&Authority>,
+    headers: &HeaderMap,
+) -> bool {
+    configured_host.is_some()
+        && configured_host == request_host
+        && single_header(
+            headers,
+            header::HeaderName::from_static("x-forwarded-proto"),
+        ) == Some("https")
+}
+
 pub async fn handle(
     State(allowed_hosts): State<AllowedHosts>,
     mut request: Request,
@@ -113,17 +115,11 @@ pub async fn handle(
     let path = request.uri().path().to_owned();
     let start = Instant::now();
     let host = request_host(request.headers());
-    let secure = allowed_hosts.https.as_ref().is_some_and(|config| {
-        host.as_ref() == Some(&config.host)
-            && request
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .is_some_and(|peer| peer.0.ip() == config.proxy)
-            && single_header(
-                request.headers(),
-                header::HeaderName::from_static("x-forwarded-proto"),
-            ) == Some("https")
-    });
+    let secure = is_https_forward(
+        allowed_hosts.https.as_ref(),
+        host.as_ref(),
+        request.headers(),
+    );
     let mut response = if let Some(host) = host {
         let allowed_http = allowed_hosts.is_http_host(&host);
         if secure || (allowed_hosts.https.is_none() && allowed_http) {

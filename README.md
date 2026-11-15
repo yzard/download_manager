@@ -85,7 +85,9 @@ docker compose -f /data/docker/4_torrent.yaml up -d --no-deps download_manager
 
 网页使用 POST 接口。登录、下载队列和百度设置分别位于 `/api/v1/auth/`、`/api/v1/downloads/` 和 `/api/v1/baidu/` 下。浏览器会话需要同源请求。
 
-让 Caddy 终止 TLS 并负责 HTTP 跳转。Download Manager 在容器里使用 HTTP。同时设置 `WEB_HTTPS_HOST` 和 `WEB_TRUSTED_PROXY`。前者是浏览器访问的域名，后者是 Caddy 连接到容器时的源 IP。Caddy 保留 Host，并转发 `X-Forwarded-Proto: https`。应用只接受来自这个代理的 HTTPS 转发请求，并发送 Secure Cookie。
+让 Caddy 终止 TLS 并负责 HTTP 跳转。在 Download Manager 中设置 `WEB_HTTPS_HOST` 为浏览器访问的域名。Caddy 保留 Host，并转发 `X-Forwarded-Proto: https`。应用会校验域名和转发协议，使用 Secure Cookie，并对写请求校验同源。
+
+在这种部署中，取消 Download Manager 的 `ports` 映射。将 Download Manager 和 Caddy 放在专用 Docker 网络中，只允许 Caddy 访问应用端口。网盘下载需要出站网络连接。升级现有部署时，移除 `WEB_TRUSTED_PROXY`。
 
 ## 挂载到网站子路径
 

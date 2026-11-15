@@ -58,3 +58,30 @@ fn accepts_root_or_a_literal_nested_base_path() {
         assert!(hosts.clone().with_base_url(invalid).is_err());
     }
 }
+
+#[test]
+fn accepts_configured_https_forward_without_a_peer_address() {
+    let allowed = AllowedHosts::default()
+        .with_https("app.example.com")
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("app.example.com"));
+    let proto = header::HeaderName::from_static("x-forwarded-proto");
+    let valid = |headers: &HeaderMap| {
+        is_https_forward(
+            allowed.https.as_ref(),
+            request_host(headers).as_ref(),
+            headers,
+        )
+    };
+    assert!(!valid(&headers));
+    headers.insert(&proto, HeaderValue::from_static("http"));
+    assert!(!valid(&headers));
+    headers.insert(&proto, HeaderValue::from_static("https"));
+    assert!(valid(&headers));
+    headers.insert(header::HOST, HeaderValue::from_static("other.example.com"));
+    assert!(!valid(&headers));
+    headers.insert(header::HOST, HeaderValue::from_static("app.example.com"));
+    headers.append(proto, HeaderValue::from_static("https"));
+    assert!(!valid(&headers));
+}
