@@ -4,9 +4,9 @@ Download Manager 提供 Rust API 和 JavaScript 页面，显示下载文件、�
 
 ## 构建和发布
 
-在本机仓库目录运行 `./build_docker.sh` 构建镜像。`./build_docker.sh --publish` 向 GHCR 发布 AMD64 和 ARM64 镜像，需要已有的 GHCR 登录。GitHub Actions 在主分支的构建输入变化时调用相同的发布脚本。
+`VERSION` 保存 Download Manager 的镜像版本。每次发布前递增版本号，再把改动连同版本号一起推到 `main`。GitHub Actions 发布 AMD64 和 ARM64 镜像，并验证版本 tag 和 `latest` 指向同一个镜像摘要。BaiduPCS-Go 的版本在 Dockerfile 中独立管理。
 
-镜像地址为 `ghcr.io/yzard/download_manager:4.0.2`。NAS 从 GHCR 拉取镜像。
+运行 `./build_docker.sh` 在本地构建并打两个 tag。运行 `./build_docker.sh --publish` 可以手动发布，需要先登录 GHCR。NAS 可拉取 `ghcr.io/yzard/download_manager:latest`，也可以指定版本 tag，例如 `ghcr.io/yzard/download_manager:4.0.3`。
 
 ## 本地开发
 
@@ -28,7 +28,7 @@ cargo test --manifest-path src/backend/Cargo.toml --target-dir build/backend --l
 services:
   download_manager:
     container_name: download_manager
-    image: ghcr.io/yzard/download_manager:4.0.2
+    image: ghcr.io/yzard/download_manager:latest
     restart: always
     env_file: ./lsio.env
     environment:

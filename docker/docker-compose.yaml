@@ -1,7 +1,7 @@
 services:
   download_manager:
     container_name: download_manager
-    image: ghcr.io/yzard/download_manager:4.0.2
+    image: ghcr.io/yzard/download_manager:latest
     env_file: ../playground/.env
     volumes:
       - ../playground/config:/config
